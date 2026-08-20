@@ -17,16 +17,16 @@ function Require-Command([string]$Name, [string]$InstallHint) {
 }
 
 Require-Command "python" "Install Python 3.11+ and enable Add Python to PATH."
-Require-Command "node" "Install Node.js 20 LTS or newer."
+Require-Command "node" "Install Node.js 22.13 or newer."
 Require-Command "npm" "npm is normally included with Node.js."
 
 $pythonVersion = & python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
 if ([version]$pythonVersion -lt [version]"3.11") {
     throw "Python $pythonVersion is too old; Python 3.11+ is required."
 }
-$nodeMajor = [int]((& node -p "process.versions.node.split('.')[0]").Trim())
-if ($nodeMajor -lt 20) {
-    throw "Node.js $(& node --version) is too old; Node.js 20+ is required."
+$nodeVersion = ((& node -p "process.versions.node").Trim())
+if ([version]$nodeVersion -lt [version]"22.13") {
+    throw "Node.js $nodeVersion is too old; Node.js 22.13+ is required for the built-in SQLite runtime."
 }
 
 if (-not (Test-Path -LiteralPath $venvPython)) {

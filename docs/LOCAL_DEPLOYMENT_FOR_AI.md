@@ -8,7 +8,7 @@
 
 - Windows 10/11 x64。
 - Python 3.11 或更高版本，命令名为 `python`。
-- Node.js 20 或更高版本，包含 `npm`。
+- Node.js 22.13 或更高版本，包含 `npm`；该版本要求来自 Studio 的 Node 内置 SQLite 运行时。
 - Google Chrome 或 Microsoft Edge，用于番茄的可见浏览器会话。
 - Google Antigravity/AGY CLI，用于生产生成；安装与登录必须走其官方流程。
 - 仓库已内置 `skills\webnovel-writing` 写作 Skill 核心，无需额外下载。

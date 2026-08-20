@@ -7,7 +7,7 @@
 ## Tomota Studio
 
 Tomota Studio 是本项目的本地可视化控制台。Google Antigravity 负责生成当前阶段产物，
-Tomota 严格状态机负责验证和推进；没有 Codex/OpenAI 生产后备。依赖 Python 3.11+、Node.js 20+、npm、Google Chrome 或 Microsoft Edge。首次使用先安装依赖并构建：
+Tomota 严格状态机负责验证和推进；没有 Codex/OpenAI 生产后备。依赖 Python 3.11+、Node.js 22.13+、npm、Google Chrome 或 Microsoft Edge。Node 22.13 是内置 SQLite 运行时的最低版本。首次使用先安装依赖并构建：
 
 ```powershell
 $repo = (Get-Location).Path
