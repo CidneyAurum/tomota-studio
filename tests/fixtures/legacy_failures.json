@@ -1,0 +1,13 @@
+[
+  {"id": "speaker_name_question", "gate": "review_voice", "text": "这里写的是维拉·安瑟？", "rule": "姓名问句必须显出说话者的核验目的"},
+  {"id": "hidden_name_translation", "gate": "review_voice", "text": "她不让我叫名字。", "rule": "隐瞒姓名的对白必须符合中文口语并明确禁令对象"},
+  {"id": "letter_without_closeup", "gate": "review_logic", "text": "只有一行字。你杀错人了。", "rule": "核心物证需要特写、反应、选择与后果"},
+  {"id": "thirteenth_then_second", "gate": "review_continuity", "text": "第十三响落下，随后传来第二次敲击。", "rule": "计数序列必须说明重置对象"},
+  {"id": "oswin_without_motivation", "gate": "review_logic", "text": "阿贝尔披上外衣，去找奥斯温。", "rule": "关键行动必须由可见线索或目标触发"},
+  {"id": "ears_behind_wall", "gate": "review_voice", "text": "小声点，墙后有耳朵。", "rule": "避免英语直译，使用中文习惯或世界内具体威胁"},
+  {"id": "dangling_no_answer", "gate": "review_voice", "text": "奥斯温没有回答。", "rule": "回答或沉默必须有紧邻的提问对象"},
+  {"id": "unanchored_east_booth", "gate": "review_logic", "text": "守夜人朝东亭喊了一声。", "rule": "地点简称第一次出现前必须有全称与功能"},
+  {"id": "unmotivated_knife", "gate": "review_logic", "text": "手伸进桌下，握住短刀。", "rule": "突发防卫动作必须有职业、威胁或前置状态支撑"},
+  {"id": "vague_ring_inference", "gate": "review_logic", "text": "这不证明寄信人是维拉。\n但有人知道那枚戒指，也知道原判在谁手里。", "rule": "推理必须把物证连接到可执行判断"},
+  {"id": "unconvincing_unseen_face", "gate": "review_logic", "text": "戴王室传令牌。脸没看清。", "rule": "关键身份来源不能以无支撑的视觉缺失搪塞"}
+]

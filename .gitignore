@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tomota.db
+tomota.db-*
+studio.db
+studio.db-*
+.tomota-studio/
+.venv/
+*.egg-info/
+studio/node_modules/
+studio/dist/
+studio/dist-server/
+studio/.vite/
+
+# Local books, review material, runtime indexes and generated manuals
+books/
+library/
+audit/
+.tmp/
+docs/*.docx
+config/skill.lock.yaml
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
