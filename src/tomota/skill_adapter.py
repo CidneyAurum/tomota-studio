@@ -52,6 +52,7 @@ TEMPLATE_PATHS = [
 PROJECT_PREFERENCES_PATH = Path("library/preferences/writing_preferences.md")
 DEFAULT_OH_STORY_ROOT = Path.home() / ".codex" / "skills" / "oh-story-claudecode"
 DEFAULT_WEBNOVEL_ROOT = Path.home() / ".codex" / "skills" / "webnovel-writing"
+BUNDLED_WEBNOVEL_ROOT = Path(__file__).resolve().parents[2] / "skills" / "webnovel-writing"
 
 
 def stable_hash(value: Any) -> str:
@@ -86,12 +87,15 @@ class SkillAdapter:
             Path(configured).expanduser().resolve() if configured else None,
             Path(os.environ["TOMOTA_STORY_SKILL_ROOT"]).expanduser().resolve() if os.environ.get("TOMOTA_STORY_SKILL_ROOT") else None,
             Path(os.environ["TOMOTA_WEBNOVEL_SKILL_ROOT"]).expanduser().resolve() if os.environ.get("TOMOTA_WEBNOVEL_SKILL_ROOT") else None,
+            BUNDLED_WEBNOVEL_ROOT,
             DEFAULT_OH_STORY_ROOT,
             DEFAULT_WEBNOVEL_ROOT,
         ]
         for candidate in candidates:
             if candidate and candidate.is_dir() and ((candidate / "skills").is_dir() or (candidate / "SKILL.md").is_file()):
                 return candidate
+        if BUNDLED_WEBNOVEL_ROOT.is_dir():
+            return BUNDLED_WEBNOVEL_ROOT
         return DEFAULT_OH_STORY_ROOT if DEFAULT_OH_STORY_ROOT.is_dir() else DEFAULT_WEBNOVEL_ROOT
 
     def _detect_oh_story(self) -> bool:
@@ -385,6 +389,33 @@ class SkillAdapter:
                 ))
                 if len(references) >= limit:
                     break
+
+        # The portable Skill intentionally omits downloaded source corpora. Its
+        # curated module examples still provide useful, redistributable local
+        # references, so a clean installation never has to fabricate examples.
+        if not references:
+            modules_dir = self.root / "references" / "modules"
+            if modules_dir.is_dir():
+                for example_file in sorted(modules_dir.glob("*/good_examples.md")):
+                    text = example_file.read_text(encoding="utf-8", errors="replace")
+                    haystack = f"{example_file.parent.name}\n{text}".lower()
+                    if keyword and keyword.lower() not in haystack:
+                        continue
+                    if tag and tag.lower() not in haystack:
+                        continue
+                    module_name = example_file.parent.name
+                    references.append(Reference(
+                        kind="module_example",
+                        ref_id=f"{module_name}:good_examples",
+                        title=f"{module_name} 正例库",
+                        excerpt_type=excerpt_type or "module_example",
+                        tags=[tag] if tag else [module_name],
+                        path=str(example_file),
+                        text=text[:1200],
+                        summary=f"来自内置写作 Skill 的 {module_name} 正例。",
+                    ))
+                    if len(references) >= limit:
+                        break
         return references
 
     def _parse_search_output(self, output: str) -> list[Reference]:
@@ -580,6 +611,7 @@ class SkillAdapter:
             "modules": {},
             "templates": {},
             "corpus_script": (self.root / "scripts" / "search_corpus_examples.py").is_file() or self.is_oh_story,
+            "portable_examples": any((self.root / "references" / "modules").glob("*/good_examples.md")),
         }
         for module in MODULE_NAMES:
             pack = self.load_module(module)

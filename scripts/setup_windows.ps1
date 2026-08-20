@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$InstallCodexSkill
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +55,10 @@ if (-not $SkipTests) {
     } finally {
         $env:PYTHONPATH = $priorPythonPath
     }
+}
+
+if ($InstallCodexSkill) {
+    & (Join-Path $repoRoot "scripts\install_codex_skill.ps1")
 }
 
 Write-Host ""

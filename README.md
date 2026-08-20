@@ -1,8 +1,8 @@
 # Tomota Writer
 
-本项目是一个本地优先的中文网文写作中台，原生绑定已安装的
-`webnovel-writing` Codex skill。它不复制 skill 的语料或规则，而是读取
-skill 目录、锁定文件哈希、按模块路由任务，并将每次生成和审查记录到本地。
+本项目是一个本地优先的中文网文写作中台，仓库已内置可移植的
+`webnovel-writing` Skill 核心。全新电脑无需先安装 Skill，Tomota 会直接读取
+仓库内的模块、模板与审查规则，锁定文件哈希，按阶段路由任务，并把生成和审查记录到本地。
 
 ## Tomota Studio
 
@@ -25,6 +25,15 @@ Windows 也可以直接使用仓库内的部署脚本：
 powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\start_windows.ps1
 ```
+
+如需让 Codex 本身也使用仓库内的同一套 Skill，可在安装时增加开关：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -InstallCodexSkill
+```
+
+或单独运行 `scripts/install_codex_skill.ps1`。目标目录已存在时脚本不会覆盖；明确使用
+`-Replace` 时会先把旧 Skill 移到带时间戳的备份目录。详见 [skills/README.md](skills/README.md)。
 
 完整的迁移、依赖、数据隔离与 AI 自动部署约束见 [docs/LOCAL_DEPLOYMENT_FOR_AI.md](docs/LOCAL_DEPLOYMENT_FOR_AI.md)。
 
@@ -135,13 +144,13 @@ tomota cleanup --book-id demo
 tomota cleanup --book-id demo --apply
 ```
 
-默认 skill 路径位于当前用户的 Codex 目录：
+Tomota 默认使用仓库内置路径：
 
 ```text
-%USERPROFILE%\.codex\skills\webnovel-writing
+<仓库>\skills\webnovel-writing
 ```
 
-可通过环境变量 `TOMOTA_WEBNOVEL_SKILL_ROOT` 覆盖。系统不会读取密码、Cookie、验证码或浏览器存储，也不会绕过番茄的实名和风控流程。
+可通过环境变量 `TOMOTA_WEBNOVEL_SKILL_ROOT` 覆盖为用户自己的完整版 Skill。可移植版不包含下载的小说原文、PDF、抓取工具和语料索引；系统不会读取密码、Cookie、验证码或浏览器存储，也不会绕过番茄的实名和风控流程。
 
 ## 生成方式
 
@@ -151,6 +160,7 @@ tomota cleanup --book-id demo --apply
 
 ```text
 config/      skill 锁文件
+skills/      可移植的 webnovel-writing Skill 核心与安装说明
 library/     运行时索引和规则快照
 books/       书籍、Canon、章纲、正文、审查和发布记录
 src/tomota/  适配器、路由、流水线、审查、存储和发布接口

@@ -26,7 +26,9 @@ from tomota.workflow import WorkflowEngine, WorkflowError
 from tomota.cli import main as cli_main
 
 
-SKILL_ROOT = Path.home() / ".codex" / "skills" / "webnovel-writing"
+# The same bundled skill used by a clean Tomota installation keeps CI and the
+# deployed product on one deterministic ruleset.
+SKILL_ROOT = Path(__file__).parent.parent / "skills" / "webnovel-writing"
 
 
 class CliJsonContractTests(unittest.TestCase):
@@ -63,6 +65,12 @@ def strict_approve(store: ProjectStore, contract: ChapterContract, content: str)
 
 
 class SkillAdapterTests(unittest.TestCase):
+    def test_clean_install_discovers_bundled_skill_without_user_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = SkillAdapter(Path(directory))
+            self.assertEqual(adapter.root, SKILL_ROOT.resolve())
+            self.assertTrue(adapter.doctor()["ok"])
+
     def test_inspect_refresh_verify_and_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

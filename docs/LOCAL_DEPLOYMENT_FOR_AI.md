@@ -11,7 +11,8 @@
 - Node.js 20 或更高版本，包含 `npm`。
 - Google Chrome 或 Microsoft Edge，用于番茄的可见浏览器会话。
 - Google Antigravity/AGY CLI，用于生产生成；安装与登录必须走其官方流程。
-- 可选的 Codex 写作 Skill。默认在当前用户的 `%USERPROFILE%\.codex\skills\` 下查找，也可用环境变量覆盖。
+- 仓库已内置 `skills\webnovel-writing` 写作 Skill 核心，无需额外下载。
+- 可选：把内置 Skill 安装到 Codex，或用环境变量指定用户自己的完整版 Skill。
 
 ## 禁止事项
 
@@ -36,8 +37,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
 4. 使用锁文件执行 `npm ci`。
 5. 构建 React 前端和 Node TypeScript 服务。
 6. 默认运行 Python、Studio 和浏览器桥接测试。
+7. Tomota 直接使用仓库内置 Skill；增加 `-InstallCodexSkill` 时才会把它安装到当前用户的 Codex 目录。
 
 如只需要快速安装，可使用 `-SkipTests`；正式交付不建议跳过。
+
+## Skill 使用与安装
+
+Tomota Studio 开箱即用，不需要复制 Skill：
+
+```text
+<仓库>\skills\webnovel-writing
+```
+
+如需让 Codex 也识别同一套 Skill：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_codex_skill.ps1
+```
+
+也可在总安装命令中添加 `-InstallCodexSkill`。如果目标目录已经存在，安装会安全停止；只有用户明确运行下列命令时才替换，并先保存时间戳备份：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_codex_skill.ps1 -Replace
+```
+
+内置版包含主说明、十个专项模块、模板、正反例和审查规则。下载的小说原文、PDF、抓取工具和生成的语料索引不随项目分发。需要用户自有完整版 Skill 时，设置 `TOMOTA_WEBNOVEL_SKILL_ROOT` 指向其目录即可。
 
 ## 启动
 
@@ -57,8 +81,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_windows.ps1 -Port 44127
 
 - `TOMOTA_AGY_EXECUTABLE`：AGY CLI 的完整路径。
 - `TOMOTA_CHROME_PATH`：Chrome/Edge 可执行文件完整路径。
-- `TOMOTA_STORY_SKILL_ROOT`：整合型 story skill 根目录。
-- `TOMOTA_WEBNOVEL_SKILL_ROOT`：`webnovel-writing` skill 根目录。
+- `TOMOTA_STORY_SKILL_ROOT`：覆盖为用户自己的整合型 story skill 根目录。
+- `TOMOTA_WEBNOVEL_SKILL_ROOT`：覆盖内置版的 `webnovel-writing` Skill 根目录。
 - `TOMOTA_AGY_PREFIX_ARGS`：传给 AGY 的 JSON 参数数组；非必要不要设置。
 
 `.env.example` 只用于说明，程序不会自动读取它。环境变量应由用户在当前 PowerShell 会话或其可信本机配置中设置。

@@ -11,7 +11,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-ROOT = Path(r"D:\tomota")
+ROOT = Path(__file__).resolve().parent.parent
 IMAGE_DIR = ROOT / ".tomota-studio"
 OUTPUT = ROOT / "docs" / "Tomota-Studio-使用说明.docx"
 
