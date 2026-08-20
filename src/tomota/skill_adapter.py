@@ -87,16 +87,18 @@ class SkillAdapter:
             Path(configured).expanduser().resolve() if configured else None,
             Path(os.environ["TOMOTA_STORY_SKILL_ROOT"]).expanduser().resolve() if os.environ.get("TOMOTA_STORY_SKILL_ROOT") else None,
             Path(os.environ["TOMOTA_WEBNOVEL_SKILL_ROOT"]).expanduser().resolve() if os.environ.get("TOMOTA_WEBNOVEL_SKILL_ROOT") else None,
-            BUNDLED_WEBNOVEL_ROOT,
             DEFAULT_OH_STORY_ROOT,
             DEFAULT_WEBNOVEL_ROOT,
+            BUNDLED_WEBNOVEL_ROOT,
         ]
         for candidate in candidates:
             if candidate and candidate.is_dir() and ((candidate / "skills").is_dir() or (candidate / "SKILL.md").is_file()):
                 return candidate
-        if BUNDLED_WEBNOVEL_ROOT.is_dir():
-            return BUNDLED_WEBNOVEL_ROOT
-        return DEFAULT_OH_STORY_ROOT if DEFAULT_OH_STORY_ROOT.is_dir() else DEFAULT_WEBNOVEL_ROOT
+        if DEFAULT_OH_STORY_ROOT.is_dir():
+            return DEFAULT_OH_STORY_ROOT
+        if DEFAULT_WEBNOVEL_ROOT.is_dir():
+            return DEFAULT_WEBNOVEL_ROOT
+        return BUNDLED_WEBNOVEL_ROOT
 
     def _detect_oh_story(self) -> bool:
         return (self.root / "skills" / "story-long-write").is_dir() or (self.root / "skills" / "story-setup").is_dir()

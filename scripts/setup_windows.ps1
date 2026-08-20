@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipTests,
-    [switch]$InstallCodexSkill
+    [switch]$InstallCodexSkill,
+    [switch]$RefreshSkillLock
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $studioRoot = Join-Path $repoRoot "studio"
 $venvRoot = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+$tomotaExe = Join-Path $venvRoot "Scripts\tomota.exe"
 
 function Require-Command([string]$Name, [string]$InstallHint) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -34,6 +36,12 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -e $repoRoot
+
+$skillLock = Join-Path $repoRoot "config\skill.lock.yaml"
+if ($RefreshSkillLock -or -not (Test-Path -LiteralPath $skillLock)) {
+    & $tomotaExe --root $repoRoot skill refresh-lock | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to initialize the bundled writing Skill lock." }
+}
 
 Push-Location $studioRoot
 try {

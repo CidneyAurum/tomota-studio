@@ -1,8 +1,8 @@
 # Tomota Writer
 
-本项目是一个本地优先的中文网文写作中台，仓库已内置可移植的
-`webnovel-writing` Skill 核心。全新电脑无需先安装 Skill，Tomota 会直接读取
-仓库内的模块、模板与审查规则，锁定文件哈希，按阶段路由任务，并把生成和审查记录到本地。
+本项目是一个本地优先的中文网文写作中台。Tomota 优先保留并读取当前电脑已安装的
+`oh-story-claudecode` 或 `webnovel-writing`；只有新电脑没有安装写作 Skill 时，才回退到
+仓库内置的可移植 `webnovel-writing` 核心。系统会锁定实际选中版本的文件哈希，按阶段路由任务，并把生成和审查记录到本地。
 
 ## Tomota Studio
 
@@ -34,6 +34,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -InstallCod
 
 或单独运行 `scripts/install_codex_skill.ps1`。目标目录已存在时脚本不会覆盖；明确使用
 `-Replace` 时会先把旧 Skill 移到带时间戳的备份目录。详见 [skills/README.md](skills/README.md)。
+
+从旧版升级后如果界面提示 Skill 已变化，可在“系统设置”点击“重新锁定当前 Skill”，或明确运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -SkipTests -RefreshSkillLock
+```
 
 完整的迁移、依赖、数据隔离与 AI 自动部署约束见 [docs/LOCAL_DEPLOYMENT_FOR_AI.md](docs/LOCAL_DEPLOYMENT_FOR_AI.md)。
 
@@ -144,9 +150,11 @@ tomota cleanup --book-id demo
 tomota cleanup --book-id demo --apply
 ```
 
-Tomota 默认使用仓库内置路径：
+Tomota 的默认发现顺序为：环境变量明确指定、当前用户已安装 Skill、仓库内置回退版本。常见本机路径为：
 
 ```text
+%USERPROFILE%\.codex\skills\oh-story-claudecode
+%USERPROFILE%\.codex\skills\webnovel-writing
 <仓库>\skills\webnovel-writing
 ```
 

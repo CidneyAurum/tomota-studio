@@ -11,7 +11,8 @@
 - Node.js 22.13 或更高版本，包含 `npm`；该版本要求来自 Studio 的 Node 内置 SQLite 运行时。
 - Google Chrome 或 Microsoft Edge，用于番茄的可见浏览器会话。
 - Google Antigravity/AGY CLI，用于生产生成；安装与登录必须走其官方流程。
-- 仓库已内置 `skills\webnovel-writing` 写作 Skill 核心，无需额外下载。
+- 优先复用当前用户已经安装的 `oh-story-claudecode` 或 `webnovel-writing`，保持原有本机流程。
+- 若新电脑没有已安装 Skill，则自动回退到仓库内置的 `skills\webnovel-writing` 核心，无需额外下载。
 - 可选：把内置 Skill 安装到 Codex，或用环境变量指定用户自己的完整版 Skill。
 
 ## 禁止事项
@@ -37,13 +38,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
 4. 使用锁文件执行 `npm ci`。
 5. 构建 React 前端和 Node TypeScript 服务。
 6. 默认运行 Python、Studio 和浏览器桥接测试。
-7. Tomota 直接使用仓库内置 Skill；增加 `-InstallCodexSkill` 时才会把它安装到当前用户的 Codex 目录。
+7. Tomota 优先使用当前用户已安装的 Skill；不存在时才读取仓库内置版。
+8. 增加 `-InstallCodexSkill` 时才会把内置版安装到当前用户的 Codex 目录。
+9. 全新部署会自动建立实际选中 Skill 的锁；已有锁不会被安装脚本静默覆盖。
 
 如只需要快速安装，可使用 `-SkipTests`；正式交付不建议跳过。
 
 ## Skill 使用与安装
 
-Tomota Studio 开箱即用，不需要复制 Skill：
+Tomota Studio 开箱即用。没有用户级 Skill 时使用：
 
 ```text
 <仓库>\skills\webnovel-writing
@@ -62,6 +65,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install_codex_skill.ps1 -Repl
 ```
 
 内置版包含主说明、十个专项模块、模板、正反例和审查规则。下载的小说原文、PDF、抓取工具和生成的语料索引不随项目分发。需要用户自有完整版 Skill 时，设置 `TOMOTA_WEBNOVEL_SKILL_ROOT` 指向其目录即可。
+
+旧版本升级后若 Skill 来源发生变化，Studio 会显示差异并提供“重新锁定当前 Skill”按钮。AI 代理不得自行接受变化；只有用户确认后，才可点击按钮或运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -SkipTests -RefreshSkillLock
+```
 
 ## 启动
 

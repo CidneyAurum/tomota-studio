@@ -1,7 +1,9 @@
 # Bundled writing skill
 
-Tomota Studio ships with `skills/webnovel-writing` and reads it directly on a
-clean installation. No separate Skill installation is required for Studio.
+Tomota Studio ships with `skills/webnovel-writing` as a portable fallback. It
+preserves and prefers an existing user-level `oh-story-claudecode` or
+`webnovel-writing` installation. A clean computer without either uses this
+bundled edition automatically, so Studio does not require a separate install.
 
 The bundled edition includes the workflow instructions, ten specialist modules,
 templates, review rules, and curated positive/negative examples. Large source

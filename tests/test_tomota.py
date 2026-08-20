@@ -9,6 +9,7 @@ import io
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from tomota.generator import MockGenerator
 from tomota.autopilot import AutopilotRunner
@@ -65,11 +66,24 @@ def strict_approve(store: ProjectStore, contract: ChapterContract, content: str)
 
 
 class SkillAdapterTests(unittest.TestCase):
+    def test_existing_user_skill_is_preferred_over_bundled_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            user_skill = Path(directory) / "user-oh-story"
+            (user_skill / "skills" / "story-long-write").mkdir(parents=True)
+            missing_webnovel = Path(directory) / "missing-webnovel"
+            with patch("tomota.skill_adapter.DEFAULT_OH_STORY_ROOT", user_skill), patch("tomota.skill_adapter.DEFAULT_WEBNOVEL_ROOT", missing_webnovel):
+                adapter = SkillAdapter(Path(directory) / "project")
+                self.assertTrue(adapter.root.samefile(user_skill))
+                self.assertTrue(adapter.is_oh_story)
+
     def test_clean_install_discovers_bundled_skill_without_user_profile(self):
         with tempfile.TemporaryDirectory() as directory:
-            adapter = SkillAdapter(Path(directory))
-            self.assertEqual(adapter.root, SKILL_ROOT.resolve())
-            self.assertTrue(adapter.doctor()["ok"])
+            missing_oh_story = Path(directory) / "missing-oh-story"
+            missing_webnovel = Path(directory) / "missing-webnovel"
+            with patch("tomota.skill_adapter.DEFAULT_OH_STORY_ROOT", missing_oh_story), patch("tomota.skill_adapter.DEFAULT_WEBNOVEL_ROOT", missing_webnovel):
+                adapter = SkillAdapter(Path(directory))
+                self.assertEqual(adapter.root, SKILL_ROOT.resolve())
+                self.assertTrue(adapter.doctor()["ok"])
 
     def test_inspect_refresh_verify_and_modules(self):
         with tempfile.TemporaryDirectory() as directory:

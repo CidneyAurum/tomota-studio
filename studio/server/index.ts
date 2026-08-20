@@ -104,6 +104,16 @@ async function projectSummaries(): Promise<Array<Record<string, unknown>>> {
   }));
 }
 
+async function skillSettings(): Promise<Record<string, unknown>> {
+  const result = await python.run<Record<string, unknown>>(["skill", "status"], { allowExitCodes: [2] })
+    .catch((error) => ({ value: { ok: false, error: error instanceof Error ? error.message : String(error) } }));
+  const value = result.value as Record<string, unknown>;
+  const manifestValue = value.manifest;
+  if (!manifestValue || Array.isArray(manifestValue) || typeof manifestValue !== "object") return value;
+  const { file_hashes: _fileHashes, ...manifest } = manifestValue as Record<string, unknown>;
+  return {...value, manifest};
+}
+
 async function api(request: IncomingMessage, response: ServerResponse, url: URL): Promise<boolean> {
   if (!url.pathname.startsWith("/api/")) return false;
   if (request.method === "GET" && url.pathname === "/api/health") {
@@ -259,8 +269,12 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
     return true;
   }
   if (request.method === "GET" && url.pathname === "/api/settings") {
-    const skill = await python.run(["skill", "status"], { allowExitCodes: [2] }).catch((error) => ({ value: { ok: false, error: error instanceof Error ? error.message : String(error) } }));
-    json(response, 200, { antigravity: runner.status(), fanqie: fanqie.availability(), skill: skill.value, migration, retention: {days: 7, maxBookMb: 100, defaultAction: "preview"} });
+    json(response, 200, { antigravity: runner.status(), fanqie: fanqie.availability(), skill: await skillSettings(), migration, retention: {days: 7, maxBookMb: 100, defaultAction: "preview"} });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/skill/refresh-lock") {
+    await python.run(["skill", "refresh-lock"]);
+    json(response, 200, await skillSettings());
     return true;
   }
   if (request.method === "POST" && url.pathname === "/api/antigravity/probe") {
