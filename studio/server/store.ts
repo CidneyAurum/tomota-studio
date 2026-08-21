@@ -257,12 +257,12 @@ export class StudioStore {
     const clean = message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").slice(0, 12000);
     const createdAt = isoNow();
     const result = this.db.prepare("INSERT INTO job_events(job_id,level,message,created_at) VALUES(?,?,?,?)").run(jobId, level, clean, createdAt);
-    return { id: Number(result.lastInsertRowid), jobId, level, message: clean, createdAt };
+   return { id: Number(result.lastInsertRowid), jobId, level, kind: "log" as const, payload: null, message: clean, createdAt };
   }
 
   listEvents(jobId: string, after = 0): JobEvent[] {
     const rows = this.db.prepare("SELECT * FROM job_events WHERE job_id=? AND id>? ORDER BY id LIMIT 500").all(jobId, after) as Array<Record<string, unknown>>;
-    return rows.map((row) => ({ id: Number(row.id), jobId: String(row.job_id), level: String(row.level) as JobEvent["level"], message: String(row.message), createdAt: String(row.created_at) }));
+   return rows.map((row) => ({ id: Number(row.id), jobId: String(row.job_id), level: String(row.level) as JobEvent["level"], kind: "log" as const, payload: null, message: String(row.message), createdAt: String(row.created_at) }));
   }
 
   addWorkflowFeedback(runId: string, bookId: string, stage: string, chapter: number | null, content: string): WorkflowFeedback {

@@ -394,6 +394,11 @@ export class FanqieBrowserService {
     const account = this.activeAccount();
     const platformWork = this.store.listWorks(account.id).find((work) => work.platformId === platformWorkId);
     if (!platformWork) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
+    const writeWindow = fanqieWriteWindow();
+    if (!writeWindow.allowed) throw Object.assign(new Error(writeWindow.message), {code: "time_window_blocked", writeWindow});
+    if (this.store.getMeta(`fanqie_book_pending_batch:${account.id}:${bookId}`)) {
+      throw Object.assign(new Error("当前作品已有待确认发布批次；请先完成、同步或重新生成该批次，避免旧批次混入新内容"), {code: "pending_batch_exists"});
+    }
     await this.preflightPublish(platformWorkId);
     const mode = options.mode === "immediate" ? "immediate" : "scheduled";
     const args = ["release", "--book-id", bookId, "--chapters", chapters.join(","), "--schedule-mode", mode, "--json"];
@@ -423,6 +428,12 @@ export class FanqieBrowserService {
     });
     preview.platform_work_id = platformWorkId;
     preview.platform_work_title = platformWork.title;
+    preview.safety = {
+      account_id: account.id,
+      ai_usage_required: true,
+      ai_usage_value: "no",
+      create_and_update_paths: preview.chapters.map((chapter) => chapter.operation === "update" ? `update:${chapter.platform_chapter_id}` : `create:${chapter.chapter_number}`),
+    };
     await writeFile(path, JSON.stringify(preview, null, 2), "utf8");
     this.store.setMeta(`fanqie_batch_account:${batchId}`, account.id);
     this.store.setMeta(`fanqie_batch_work:${batchId}`, platformWorkId);

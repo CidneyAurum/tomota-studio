@@ -31,7 +31,9 @@ export interface JobEvent {
   id: number;
   jobId: string;
   level: "info" | "stdout" | "stderr" | "error";
+  kind: "status" | "assistant_text" | "tool_event" | "usage" | "result" | "log";
   message: string;
+  payload: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -115,4 +117,10 @@ export interface PublishBatchPreview {
   next_confirmation: string;
   platform_work_id?: string;
   platform_work_title?: string;
+  safety?: {
+    account_id: string;
+    ai_usage_required: boolean;
+    ai_usage_value: "no";
+    create_and_update_paths: string[];
+  };
 }

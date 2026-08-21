@@ -45,6 +45,39 @@ function fakeLocator({ count = 1, onClick = async () => {}, onFill = async () =>
   };
 }
 
+function aiDeclarationBrowser({ canSelectNo = true, onNoClick } = {}) {
+  let currentUrl = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273";
+  let snapshot = "作家中心 章节管理 新建章节";
+  let submitClicks = 0;
+  const tab = {
+    async url() { return currentUrl; },
+    async goto(url) { currentUrl = url; },
+    playwright: {
+      async domSnapshot() { return snapshot; },
+      async waitForTimeout() {},
+      getByText(value) {
+        const text = String(value);
+        if (/新建章节|新增章节|创建章节|写新章节/.test(text)) return fakeLocator({onClick: async () => { currentUrl = "https://fanqienovel.com/main/writer/chapter/edit/new"; snapshot = "作家中心 章节标题 正文 下一步 是否使用AI 是 否"; }});
+        if (/下一步/.test(text)) return fakeLocator({onClick: async () => { snapshot = canSelectNo ? "作家中心 是否使用AI 是 否" : "作家中心 是否使用AI 是"; }});
+        if (/^否$/.test(text)) return fakeLocator({count: canSelectNo ? 1 : 0, onClick: async () => { snapshot = "作家中心 是否使用AI 是 否 已选"; onNoClick?.(); }});
+        if (/提交审核|保存并发布|发布/.test(text)) return fakeLocator({onClick: async () => { submitClicks += 1; snapshot = "作家中心 提交成功"; }});
+        return fakeLocator({count: 0});
+      },
+      getByRole(role, options = {}) {
+        const name = String(options.name || role);
+        if (/下一步/.test(name)) return fakeLocator({onClick: async () => { snapshot = canSelectNo ? "作家中心 是否使用AI 是 否" : "作家中心 是否使用AI 是"; }});
+        if (/否/.test(name)) return fakeLocator({count: canSelectNo ? 1 : 0, onClick: async () => { snapshot = "作家中心 是否使用AI 是 否 已选"; onNoClick?.(); }});
+        if (/提交审核|保存并发布|发布/.test(name)) return fakeLocator({onClick: async () => { if (role === "button") submitClicks += 1; snapshot = "作家中心 提交成功"; }});
+        return fakeLocator({count: 0});
+      },
+      getByLabel(value) { return /章节标题|标题|正文|章节内容/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+      getByPlaceholder(value) { return /标题|正文|内容/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+      locator(value) { return /input|textarea|contenteditable/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+    },
+  };
+  return { browser: {tabs: {async selected() { return tab; }}}, submitClicks: () => submitClicks};
+}
+
 function interactiveBrowser(initialSnapshot, handlers = {}) {
   let snapshot = initialSnapshot;
   const tab = {
@@ -288,5 +321,50 @@ test("schema v3 updates an existing published chapter through the two-step edito
     assert.equal(result.chapters[0].platform_id, "7675641066854302233");
     assert.equal(title, "第一章");
     assert.equal(content, "正文");
+  });
+});
+
+test("one-click submission declares no AI usage before submitting", async () => {
+  await withJob(async ({jobPath}) => {
+    const job = JSON.parse(await readFile(jobPath, "utf8"));
+    job.schema_version = 3;
+    job.platform_work_id = "7675620772693429273";
+    job.writer_url = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273";
+    await writeFile(jobPath, JSON.stringify(job), "utf8");
+    const harness = aiDeclarationBrowser();
+    const result = await runFanqiePublishJob({
+      browser: harness.browser,
+      jobPath,
+      confirmation: "PUBLISH batch-test",
+      actionConfirmation: "WRITE batch-test",
+      chapterConfirmations: {"1": "SUBMIT batch-test:1:hash"},
+      submit: true,
+    });
+    assert.equal(result.status, "submitted");
+    assert.equal(result.chapters[0].ai_usage_declared, true);
+    assert.equal(result.chapters[0].ai_usage_value, "no");
+    assert.equal(harness.submitClicks(), 1);
+  });
+});
+
+test("one-click submission stops when the AI declaration cannot select no", async () => {
+  await withJob(async ({jobPath}) => {
+    const job = JSON.parse(await readFile(jobPath, "utf8"));
+    job.schema_version = 3;
+    job.platform_work_id = "7675620772693429273";
+    job.writer_url = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273";
+    await writeFile(jobPath, JSON.stringify(job), "utf8");
+    const harness = aiDeclarationBrowser({canSelectNo: false});
+    const result = await runFanqiePublishJob({
+      browser: harness.browser,
+      jobPath,
+      confirmation: "PUBLISH batch-test",
+      actionConfirmation: "WRITE batch-test",
+      chapterConfirmations: {"1": "SUBMIT batch-test:1:hash"},
+      submit: true,
+    });
+    assert.equal(result.status, "ui_mismatch");
+    assert.match(result.message, /是否使用 AI/);
+    assert.equal(harness.submitClicks(), 0);
   });
 });

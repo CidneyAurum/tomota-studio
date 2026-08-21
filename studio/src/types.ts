@@ -71,7 +71,9 @@ export interface JobEvent {
   id: number;
   jobId: string;
   level: string;
+  kind?: string;
   message: string;
+  payload?: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -152,6 +154,7 @@ export interface BatchPreview {
   next_confirmation: string;
   platform_work_id?: string;
   platform_work_title?: string;
+  safety?: Record<string, unknown>;
 }
 
 export interface FanqieWriteWindow {

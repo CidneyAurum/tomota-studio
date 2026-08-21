@@ -229,6 +229,11 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
         assertSafePage(snapshot);
       }
 
+      const aiDeclaration = await ensureAiUsageDisabled(tab, chapter.chapter_number);
+      if (aiDeclaration.status === "ui_mismatch") {
+        return finish({ status: "ui_mismatch", message: aiDeclaration.message, chapters: result.chapters });
+      }
+
       if (chapter.scheduled_at && !updating) {
         const scheduleButton = await firstLocator(tab, [
           tab.playwright.getByText(/定时发布|定时/),
@@ -290,6 +295,9 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
         content_fingerprint: chapter.content_fingerprint,
         source_fingerprint: chapter.source_fingerprint,
         scheduled_at: chapter.scheduled_at,
+        ai_usage_declared: true,
+        ai_usage_value: "no",
+        ai_declaration: aiDeclaration.status,
         message: "已读到官方成功反馈",
       });
     }
@@ -301,6 +309,61 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
     const code = error?.code || "ui_mismatch";
     return finish({ status: code, message });
   }
+}
+
+async function ensureAiUsageDisabled(tab, chapterNumber) {
+  const snapshot = await tab.playwright.domSnapshot();
+  const declaration = /是否.{0,6}AI|AI.{0,6}(?:辅助|声明|创作|生成)|使用AI|人工智能.{0,6}(?:辅助|声明|创作)|内容.{0,6}AI/i.test(snapshot);
+  if (!declaration) return {status: "not_present", message: "页面未显示 AI 使用声明"};
+
+  const negative = await firstLocator(tab, [
+    tab.playwright.getByText(/^否$/),
+    tab.playwright.getByRole("radio", {name: /^否$|^不使用$|^未使用$/}),
+    tab.playwright.getByText(/^否(?:$|[\s,，)）])/),
+    tab.playwright.getByRole("button", {name: /^否|^不使用|^未使用|^没有使用/}),
+    tab.playwright.getByLabel(/^否|^不使用|^未使用|^没有使用/),
+    tab.playwright.locator('input[type="radio"][value="no" i], input[type="radio"][value="false" i]'),
+  ]);
+  if (!negative) {
+    return {
+      status: "ui_mismatch",
+      message: `第 ${chapterNumber} 章要求声明“是否使用 AI”，但页面未提供可确认的“否”选项，已停止提交`,
+    };
+  }
+  await negative.click();
+  await tab.playwright.waitForTimeout({timeoutMs: 300});
+  const nextSnapshot = await tab.playwright.domSnapshot();
+  if (!await isNegativeChoiceSelected(tab, negative, nextSnapshot)) {
+    return {
+      status: "ui_mismatch",
+      message: `第 ${chapterNumber} 章“是否使用 AI”未能确认已选择“否”，已停止提交`,
+    };
+  }
+  return {status: "declared_no", message: "已确认“是否使用 AI”选择“否”"};
+}
+
+async function isNegativeChoiceSelected(tab, control, snapshot) {
+  try {
+    if (typeof control.isChecked === "function" && await control.isChecked()) return true;
+  } catch {}
+  try {
+    if (typeof control.getAttribute === "function") {
+      const value = await control.getAttribute("aria-checked");
+      if (value === "true") return true;
+    }
+  } catch {}
+  try {
+    if (typeof control.evaluate === "function") {
+      const value = await control.evaluate((node) => {
+        const attributes = ["aria-checked", "aria-selected", "data-state", "checked", "selected", "value"];
+        return attributes.map((name) => `${name}=${String(node?.getAttribute?.(name) ?? node?.[name] ?? "")}`).join(";");
+      });
+      if (/(?:^|;)(?:aria-checked|aria-selected|checked|selected)=true(?:;|$)|(?:^|;)data-state=checked(?:;|$)|(?:^|;)value=(?:no|false|0)(?:;|$)/i.test(value)) return true;
+    }
+  } catch {}
+  // Some custom controls expose the selected branch in the accessibility
+  // snapshot.  Only accept a marker directly attached to the negative label.
+  return /(?:否|不使用|未使用)[^\n]{0,24}(?:已选|选中|checked|selected|active)|(?:已选|选中|checked|selected|active)[^\n]{0,24}(?:否|不使用|未使用)/i.test(snapshot);
 }
 
 function isOfficialUrl(value) {
