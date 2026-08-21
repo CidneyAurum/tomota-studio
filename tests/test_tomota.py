@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from tomota.generator import MockGenerator
 from tomota.autopilot import AutopilotRunner
-from tomota.browser_job import BrowserJobError
+from tomota.browser_job import BrowserJobError, publication_content
 from tomota.cleanup import CleanupManager
 from tomota.models import ChapterContract, ReviewGate, ReviewReport, utc_now
 from tomota.pipeline import PipelineBlocked, TomotaPipeline
@@ -151,6 +151,24 @@ class WorkflowTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_approved_chapter_can_start_author_directed_rework_without_overwriting_source(self):
+        contract = ChapterContract(
+            book_id="demo", chapter_number=1, title="旧稿", objective="调查", obstacle="受阻",
+            change="得到线索", chapter_hook="门再次响起", next_first_beat="继续追查", target_word_count=10,
+        )
+        content = "旧版正文。\n\n门再次响起。"
+        strict_approve(self.store, contract, content)
+        engine = WorkflowEngine(self.root, skill_root=SKILL_ROOT)
+        run = engine.start_rework("demo", 1, "减少解释性对白，但保留门后的伏笔")
+        self.assertEqual(run.current_stage, "chapter_design")
+        self.assertEqual(self.store.get_chapter("demo", 1)["status"], "modified_after_review")
+        stage_dir = self.store.book_dir("demo") / "workflow" / run.run_id / "chapter-0001"
+        self.assertEqual((stage_dir / "rework-source.md").read_text(encoding="utf-8").strip(), content)
+        action = engine.next_action(run.run_id)
+        prompt = Path(action["prompt_path"]).read_text(encoding="utf-8")
+        self.assertIn("减少解释性对白", prompt)
+        self.assertEqual(self.store.read_content("demo", 1).strip(), content)
 
     def test_legacy_mock_chapter_cannot_claim_strict_approval(self):
         pipeline = TomotaPipeline(self.root, skill_root=SKILL_ROOT, generator=MockGenerator())
@@ -454,6 +472,10 @@ class CleanupTests(unittest.TestCase):
 
 
 class PublisherTests(unittest.TestCase):
+    def test_publication_content_removes_local_markdown_without_losing_scene_markers(self):
+        source = "# 第一章 标题\n\n正文。\n\n###1.\n\n**关键句。**\n"
+        self.assertEqual(publication_content(source), "正文。\n\n1.\n\n关键句。\n")
+
     def test_confirmation_and_idempotency(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -491,7 +513,7 @@ class PublisherTests(unittest.TestCase):
             result_path.write_text(json.dumps({
                 "batch_id": batch.batch_id,
                 "status": "submitted",
-                "chapters": [{"chapter_number": 1, "status": "submitted", "platform_id": "fanqie-1", "content_fingerprint": job["chapters"][0]["content_fingerprint"]}],
+                "chapters": [{"chapter_number": 1, "status": "submitted", "platform_id": "fanqie-1", "content_fingerprint": job["chapters"][0]["content_fingerprint"], "source_fingerprint": job["chapters"][0]["source_fingerprint"]}],
             }, ensure_ascii=False), encoding="utf-8")
             result = publisher.reconcile_browser_job(batch)
             self.assertEqual(result.status, "submitted")
@@ -512,10 +534,32 @@ class PublisherTests(unittest.TestCase):
             Path(job["result_path"]).write_text(json.dumps({
                 "batch_id": batch.batch_id,
                 "status": "submitted",
-                "chapters": [{"chapter_number": 1, "status": "submitted", "content_fingerprint": "wrong-hash"}],
+                "chapters": [{"chapter_number": 1, "status": "submitted", "content_fingerprint": "wrong-hash", "source_fingerprint": "wrong-hash"}],
             }), encoding="utf-8")
             with self.assertRaises(BrowserJobError):
                 publisher.reconcile_browser_job(batch)
+
+    def test_browser_reconcile_accepts_night_window_stop_without_advancing_chapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            SkillAdapter(root, SKILL_ROOT).refresh_lock()
+            store = ProjectStore(root)
+            store.create_book("demo", "测试书", {})
+            contract = ChapterContract("demo", 1, "标题", "目标", "阻碍", "变化", chapter_hook="钩子", next_first_beat="下一拍", target_word_count=10)
+            strict_approve(store, contract, "正文。\n\n门开了。")
+            publisher = FanqiePublisher(store, DryRunBrowserDriver())
+            batch = publisher.prepare_batch("demo", [1], {})
+            job_path = publisher.export_browser_job(batch, confirmation=f"PUBLISH {batch.batch_id}")
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            Path(job["result_path"]).write_text(json.dumps({
+                "batch_id": batch.batch_id,
+                "status": "time_window_blocked",
+                "chapters": [],
+                "message": "北京时间 07:00 后可提交",
+            }, ensure_ascii=False), encoding="utf-8")
+            result = publisher.reconcile_browser_job(batch)
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(store.get_chapter("demo", 1)["status"], "approved")
 
 
 class SchedulerTests(unittest.TestCase):

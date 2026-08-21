@@ -32,7 +32,11 @@ async function fixture(mode: "valid" | "invalid") {
     const instruction = process.argv[process.argv.indexOf("-p") + 1];
     if (instruction.includes("TOMOTA_EXPECT_FEEDBACK") && !instruction.includes("用户对当前阶段的修改反馈")) throw new Error("feedback was not injected");
     const output = instruction.match(/UTF-8 JSON 到：(.+)/)[1].trim();
+    console.log(JSON.stringify({event:"init",conversation_id:"fixture-conversation",init:{cwd:process.cwd()}}));
+    console.log(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"file_write",path:output,duration_seconds:0.2}}));
+    console.log(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"DONE",step_type:"agent_response",text_delta:"指定 JSON 已写入"}}));
     await writeFile(output, ${mode === "valid" ? "JSON.stringify({stage:'draft',content:'正文'})" : "'not-json'"}, "utf8");
+    console.log(JSON.stringify({event:"result",status:"SUCCESS",duration_seconds:0.3,num_turns:1,usage:{total_tokens:42}}));
   `, "utf8");
   let submits = 0;
   const python = {
@@ -56,6 +60,12 @@ test("valid Antigravity JSON advances only through the Tomota submit bridge", as
     assert.ok(value.store.getJob(started.job!.id)?.outputHash);
     assert.equal(value.runner.status().execution, "ready");
     assert.equal(value.runner.status().auth, "authenticated");
+    const messages = value.store.listEvents(started.job!.id, 0).map((event) => event.message).join("\n");
+    assert.match(messages, /CLI 会话已建立/);
+    assert.match(messages, /写入产物/);
+    assert.match(messages, /指定 JSON 已写入/);
+    assert.match(messages, /CLI 完成 · SUCCESS/);
+    assert.doesNotMatch(messages, /运行 \d+ 秒 ·/);
     value.store.db.close();
   } finally { await rm(value.root, { recursive: true, force: true }); }
 });

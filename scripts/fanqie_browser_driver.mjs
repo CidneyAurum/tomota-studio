@@ -82,9 +82,12 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
     }
 
     if (job.schema_version >= 3) {
-      const targetUrl = `https://fanqienovel.com/main/writer/chapter-manage/${job.platform_work_id}`;
+      const configuredUrl = String(job.writer_url || "");
+      const targetUrl = isOfficialUrl(configuredUrl) && configuredUrl.includes(String(job.platform_work_id))
+        ? configuredUrl
+        : `https://fanqienovel.com/main/writer/chapter-manage/${job.platform_work_id}`;
       await tab.goto(targetUrl);
-      await tab.playwright.waitForTimeout({ timeoutMs: 500 });
+      await tab.playwright.waitForTimeout({ timeoutMs: 1_500 });
       snapshot = await tab.playwright.domSnapshot();
       assertSafePage(snapshot);
       const targetCurrentUrl = await tab.url();
@@ -109,23 +112,41 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
       return finish({ status: "preview", message: "已识别登录态和作品；未填写、未保存、未提交" });
     }
     for (const chapter of job.chapters) {
-      if (chapter.local_platform_id) {
+      const updating = chapter.operation === "update";
+      // Return to the bound work's chapter list before every chapter.  Fanqie
+      // may leave the browser on an editor or success page after submission;
+      // relying on that incidental state breaks the second chapter in a batch.
+      if (job.schema_version >= 3) {
+        const configuredUrl = String(job.writer_url || "");
+        const targetUrl = isOfficialUrl(configuredUrl) && configuredUrl.includes(String(job.platform_work_id))
+          ? configuredUrl
+          : `https://fanqienovel.com/main/writer/chapter-manage/${job.platform_work_id}`;
+        if ((await tab.url()) !== targetUrl) {
+          await tab.goto(targetUrl);
+          await tab.playwright.waitForTimeout({ timeoutMs: 1_500 });
+          snapshot = await tab.playwright.domSnapshot();
+          assertSafePage(snapshot);
+        }
+      }
+      if (chapter.local_platform_id && !updating) {
         result.chapters.push({
           chapter_number: chapter.chapter_number,
           status: "skipped",
           platform_id: chapter.local_platform_id,
           content_fingerprint: chapter.content_fingerprint,
+          source_fingerprint: chapter.source_fingerprint,
           message: "本地已有平台章节记录，按幂等规则跳过",
         });
         continue;
       }
-      const existing = findVisibleChapter(snapshot, chapter);
+      const existing = !updating && findVisibleChapter(snapshot, chapter);
       if (existing) {
         result.chapters.push({
           chapter_number: chapter.chapter_number,
           status: "already_exists",
           platform_id: existing.platform_id,
           content_fingerprint: chapter.content_fingerprint,
+          source_fingerprint: chapter.source_fingerprint,
           message: "页面已显示同编号/同标题章节，按幂等规则跳过",
         });
         continue;
@@ -136,34 +157,79 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
         return finish({ status: "human_action_required", message: `第 ${chapter.chapter_number} 章提交前需要即时确认：${expectedChapter}` });
       }
 
-      const createButton = await firstLocator(tab, [
-        tab.playwright.getByText(/新建章节|新增章节|创建章节|写新章节/),
-        tab.playwright.getByRole("button", { name: /新建章节|新增章节|创建章节|写新章节/ }),
-      ]);
-      if (!createButton) return finish({ status: "ui_mismatch", message: `未找到新建章节入口，第 ${chapter.chapter_number} 章停止` });
-      await createButton.click();
-      await tab.playwright.waitForTimeout({ timeoutMs: 300 });
-      snapshot = await tab.playwright.domSnapshot();
-      assertSafePage(snapshot);
+      if (updating) {
+        const modifyUrl = String(chapter.modify_url || "");
+        if (!/^\d{10,}$/.test(String(chapter.platform_chapter_id || "")) || !isOfficialUrl(modifyUrl) || !modifyUrl.includes(String(job.platform_work_id)) || !modifyUrl.includes(String(chapter.platform_chapter_id))) {
+          return finish({status: "blocked", message: `第 ${chapter.chapter_number} 章缺少受绑定的平台修改地址`});
+        }
+        await tab.goto(modifyUrl);
+        // The chapter editor is hydrated after the document load event.  On
+        // the real writer site the shell can be visible for more than 500 ms
+        // before the title input and ProseMirror body are mounted.
+        await tab.playwright.waitForTimeout({timeoutMs: 2_500});
+        snapshot = await tab.playwright.domSnapshot();
+        assertSafePage(snapshot);
+        if (!(await tab.url()).includes(String(chapter.platform_chapter_id)) || isLoginPage(snapshot)) {
+          return finish({status: isLoginPage(snapshot) ? "auth_required" : "ui_mismatch", message: `未能进入第 ${chapter.chapter_number} 章的修改页`});
+        }
+      } else {
+        const createButton = await firstLocator(tab, [
+          tab.playwright.getByText(/新建章节|新增章节|创建章节|写新章节/),
+          tab.playwright.getByRole("button", { name: /新建章节|新增章节|创建章节|写新章节/ }),
+        ]);
+        if (!createButton) return finish({ status: "ui_mismatch", message: `未找到新建章节入口，第 ${chapter.chapter_number} 章停止` });
+        await createButton.click();
+        await tab.playwright.waitForTimeout({ timeoutMs: 1_500 });
+        snapshot = await tab.playwright.domSnapshot();
+        assertSafePage(snapshot);
+      }
 
-      const titleField = await firstLocator(tab, [
+      const titleLocators = [
         tab.playwright.getByLabel(/章节标题|标题/),
         tab.playwright.getByPlaceholder(/章节标题|请输入标题/),
+        tab.playwright.locator('input[placeholder="请输入标题"]'),
         tab.playwright.locator('input[name*="title" i]'),
-      ]);
-      const contentField = await firstLocator(tab, [
+      ];
+      const contentLocators = [
         tab.playwright.getByLabel(/正文|章节内容/),
         tab.playwright.getByPlaceholder(/正文|请输入正文|章节内容/),
+        tab.playwright.locator('.ProseMirror[contenteditable="true"]'),
         tab.playwright.locator('[contenteditable="true"]'),
         tab.playwright.locator("textarea"),
-      ]);
+      ];
+      let titleField = null;
+      let contentField = null;
+      // Network/cache state makes the editor mount time variable.  Poll the
+      // documented fields instead of treating one early lookup as a schema
+      // change; the loop remains read-only and bounded.
+      for (let attempt = 0; attempt < 20 && (!titleField || !contentField); attempt += 1) {
+        titleField ||= await firstLocator(tab, titleLocators);
+        contentField ||= await firstLocator(tab, contentLocators);
+        if (!titleField || !contentField) await tab.playwright.waitForTimeout({timeoutMs: 500});
+      }
       if (!titleField || !contentField) {
         return finish({ status: "ui_mismatch", message: `未能稳定识别第 ${chapter.chapter_number} 章的标题或正文输入框，已停止` });
       }
       await titleField.fill(chapter.title);
       await contentField.fill(chapter.content);
 
-      if (chapter.scheduled_at) {
+      // The current Fanqie editor uses a two-step flow: editing first, then a
+      // submission dialog.  Older fixtures/pages may expose submit directly,
+      // so the transition remains optional and fail-closed at the final step.
+      const nextButton = await firstLocator(tab, [
+        tab.playwright.getByRole("button", {name: /^下一步$/}),
+        tab.playwright.getByText(/^下一步$/),
+      ]);
+      if (nextButton) {
+        await nextButton.click();
+        // The submission pane is lazy-mounted and its button appears after
+        // Fanqie's local autosave/validation pass finishes.
+        await tab.playwright.waitForTimeout({timeoutMs: 2_500});
+        snapshot = await tab.playwright.domSnapshot();
+        assertSafePage(snapshot);
+      }
+
+      if (chapter.scheduled_at && !updating) {
         const scheduleButton = await firstLocator(tab, [
           tab.playwright.getByText(/定时发布|定时/),
           tab.playwright.getByRole("button", { name: /定时发布|定时/ }),
@@ -180,12 +246,12 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
       }
 
       const submitButton = await firstLocator(tab, [
-        tab.playwright.getByRole("button", { name: /提交审核|发布|保存并发布/ }),
-        tab.playwright.getByText(/提交审核|保存并发布|发布/),
+        tab.playwright.getByRole("button", { name: /^(?:提交|提交审核|发布|保存并发布|确认修改|提交修改)$/ }),
+        tab.playwright.getByText(/^(?:提交|提交审核|保存并发布|确认修改|提交修改|发布)$/),
       ]);
       if (!submitButton) return finish({ status: "ui_mismatch", message: `未找到第 ${chapter.chapter_number} 章提交按钮，已停止` });
       await submitButton.click();
-      await tab.playwright.waitForTimeout({ timeoutMs: 500 });
+      await tab.playwright.waitForTimeout({ timeoutMs: 800 });
       snapshot = await tab.playwright.domSnapshot();
       assertSafePage(snapshot);
 
@@ -195,28 +261,40 @@ export async function runFanqiePublishJob({ browser, jobPath, confirmation = "",
       ]);
       if (confirmButton) {
         await confirmButton.click();
-        await tab.playwright.waitForTimeout({ timeoutMs: 500 });
+        await tab.playwright.waitForTimeout({ timeoutMs: 300 });
+      }
+      // Do not treat the chapter's pre-existing “已发布” badge as proof that
+      // this edit was accepted.  Poll for an explicit result of the current
+      // submission so a stale page cannot produce a false positive.
+      let success = false;
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        await tab.playwright.waitForTimeout({timeoutMs: 250});
         snapshot = await tab.playwright.domSnapshot();
         assertSafePage(snapshot);
+        if (/发布成功|提交成功|修改成功|修改已提交|已提交审核|审核中|定时发布成功/.test(snapshot)) {
+          success = true;
+          break;
+        }
       }
-      const success = /发布成功|提交成功|审核中|已发布|定时发布成功/.test(snapshot);
       if (!success) {
         return finish({
           status: result.chapters.length ? "partial" : "uncertain",
           message: `第 ${chapter.chapter_number} 章提交后未读到官方成功反馈，未继续下一章`,
-          chapters: result.chapters.concat([{ chapter_number: chapter.chapter_number, status: "uncertain", content_fingerprint: chapter.content_fingerprint }]),
+          chapters: result.chapters.concat([{ chapter_number: chapter.chapter_number, status: "uncertain", content_fingerprint: chapter.content_fingerprint, source_fingerprint: chapter.source_fingerprint, platform_id: chapter.platform_chapter_id }]),
         });
       }
       result.chapters.push({
         chapter_number: chapter.chapter_number,
-        status: chapter.scheduled_at ? "scheduled" : "submitted",
+        status: updating ? "updated" : chapter.scheduled_at ? "scheduled" : "submitted",
+        platform_id: updating ? chapter.platform_chapter_id : undefined,
         content_fingerprint: chapter.content_fingerprint,
+        source_fingerprint: chapter.source_fingerprint,
         scheduled_at: chapter.scheduled_at,
         message: "已读到官方成功反馈",
       });
     }
 
-    const hasFailure = result.chapters.some((item) => !["submitted", "scheduled", "already_exists", "skipped"].includes(item.status));
+    const hasFailure = result.chapters.some((item) => !["submitted", "updated", "scheduled", "already_exists", "skipped"].includes(item.status));
     return finish({ status: hasFailure ? "partial" : "submitted", message: "批次逐章处理完成" });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -249,7 +327,17 @@ function assertSafePage(snapshot) {
 async function firstLocator(tab, locators) {
   for (const locator of locators) {
     try {
-      if ((await locator.count()) > 0) return locator.first();
+      const count = await locator.count();
+      for (let index = 0; index < count; index += 1) {
+        const candidate = typeof locator.nth === "function" ? locator.nth(index) : locator.first();
+        try {
+          if (typeof candidate.isVisible === "function" && !(await candidate.isVisible())) continue;
+          if (typeof candidate.isEnabled === "function" && !(await candidate.isEnabled())) continue;
+        } catch {
+          // Lightweight test adapters may not implement visibility checks.
+        }
+        return candidate;
+      }
     } catch {
       // A selector that is not supported by the current page is not a reason
       // to guess; try the next documented locator and fail closed if none fit.

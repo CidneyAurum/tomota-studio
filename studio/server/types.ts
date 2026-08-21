@@ -89,6 +89,7 @@ export interface PlatformChapter {
   chapterNumber: number | null;
   title: string;
   status: string;
+  wordCount?: number;
   scheduledAt: string | null;
   contentHash: string;
   syncedAt: string;
@@ -105,7 +106,13 @@ export interface PublishBatchPreview {
     word_count: number;
     content_fingerprint: string;
     scheduled_at?: string | null;
+    operation?: "create" | "update";
+    platform_chapter_id?: string | null;
+    platform_status?: string | null;
+    platform_title?: string | null;
+    platform_word_count?: number | null;
   }>;
   next_confirmation: string;
   platform_work_id?: string;
+  platform_work_title?: string;
 }

@@ -174,6 +174,7 @@ test("schema v3 publish jobs navigate by the bound platform work id", async () =
     const job = JSON.parse(await readFile(jobPath, "utf8"));
     job.schema_version = 3;
     job.platform_work_id = "7675620772693429273";
+    job.writer_url = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273&%E6%B5%8B%E8%AF%95%E4%B9%A6?type=1";
     await writeFile(jobPath, JSON.stringify(job), "utf8");
     let currentUrl = "https://fanqienovel.com/main/writer/book-manage";
     const tab = {
@@ -186,7 +187,7 @@ test("schema v3 publish jobs navigate by the bound platform work id", async () =
     };
     const result = await runFanqiePublishJob({browser: {tabs: {async selected() { return tab; }}}, jobPath, confirmation: "PUBLISH batch-test"});
     assert.equal(result.status, "preview");
-    assert.equal(currentUrl, "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273");
+    assert.equal(currentUrl, job.writer_url);
   });
 });
 
@@ -198,5 +199,94 @@ test("schema v3 publish jobs fail closed without a platform work id", async () =
     const result = await runFanqiePublishJob({browser: browserWithSnapshot("作家中心 作品管理"), jobPath, confirmation: "PUBLISH batch-test"});
     assert.equal(result.status, "blocked");
     assert.match(result.message, /平台作品 ID/);
+  });
+});
+
+test("schema v3 returns to the bound chapter list between multiple uploads", async () => {
+  await withJob(async ({jobPath}) => {
+    const job = JSON.parse(await readFile(jobPath, "utf8"));
+    job.schema_version = 3;
+    job.platform_work_id = "7675620772693429273";
+    job.writer_url = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273&book?type=1";
+    job.chapters.push({chapter_number: 2, title: "第二章", content: "正文二", content_fingerprint: "hash-two"});
+    await writeFile(jobPath, JSON.stringify(job), "utf8");
+    let currentUrl = "https://fanqienovel.com/main/writer/book-manage";
+    let snapshot = "作家中心 章节管理 新建章节";
+    let creates = 0;
+    const tab = {
+      async url() { return currentUrl; },
+      async goto(url) { currentUrl = url; snapshot = "作家中心 章节管理 新建章节"; },
+      playwright: {
+        async domSnapshot() { return snapshot; },
+        async waitForTimeout() {},
+        getByText(value) {
+          const text = String(value);
+          if (/新建章节|新增章节|创建章节|写新章节/.test(text)) return fakeLocator({onClick: async () => { creates += 1; currentUrl = `https://fanqienovel.com/main/writer/chapter/edit/${creates}`; snapshot = "作家中心 章节管理 章节标题 正文 提交审核"; }});
+          if (/提交审核|保存并发布|发布/.test(text)) return fakeLocator({onClick: async () => { snapshot = "作家中心 章节管理 提交成功"; }});
+          return fakeLocator({count: 0});
+        },
+        getByRole(role, options = {}) { return this.getByText(String(options.name || role)); },
+        getByLabel(value) { return /章节标题|标题|正文|章节内容/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+        getByPlaceholder(value) { return /标题|正文|内容/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+        locator(value) { return /input|textarea|contenteditable/.test(String(value)) ? fakeLocator() : fakeLocator({count: 0}); },
+      },
+    };
+    const result = await runFanqiePublishJob({
+      browser: {tabs: {async selected() { return tab; }}},
+      jobPath,
+      confirmation: "PUBLISH batch-test",
+      actionConfirmation: "WRITE batch-test",
+      chapterConfirmations: {"1": "SUBMIT batch-test:1:hash", "2": "SUBMIT batch-test:2:hash-two"},
+      submit: true,
+    });
+    assert.equal(result.status, "submitted");
+    assert.equal(result.chapters.length, 2);
+    assert.equal(creates, 2);
+  });
+});
+
+test("schema v3 updates an existing published chapter through the two-step editor", async () => {
+  await withJob(async ({jobPath}) => {
+    const job = JSON.parse(await readFile(jobPath, "utf8"));
+    job.schema_version = 3;
+    job.platform_work_id = "7675620772693429273";
+    job.writer_url = "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273&book?type=1";
+    job.chapters[0] = {...job.chapters[0], operation: "update", platform_chapter_id: "7675641066854302233", local_platform_id: "7675641066854302233", modify_url: "https://fanqienovel.com/main/writer/7675620772693429273/publish/7675641066854302233/?enter_from=modifychapter", source_fingerprint: "source-hash"};
+    await writeFile(jobPath, JSON.stringify(job), "utf8");
+    let currentUrl = "https://fanqienovel.com/main/writer/book-manage";
+    let snapshot = "作家中心 章节管理 新建章节";
+    let title = "";
+    let content = "";
+    const tab = {
+      async url() { return currentUrl; },
+      async goto(url) { currentUrl = url; snapshot = url.includes("modifychapter") ? "作家中心 已保存 正文字数 下一步" : "作家中心 章节管理 新建章节"; },
+      playwright: {
+        async domSnapshot() { return snapshot; },
+        async waitForTimeout() {},
+        getByRole(role, options = {}) {
+          const name = String(options.name || role);
+          if (/下一步/.test(name)) return fakeLocator({onClick: async () => { snapshot = "作家中心 取消 提交"; }});
+          if (/提交/.test(name)) return fakeLocator({onClick: async () => { snapshot = "作家中心 修改成功"; }});
+          return fakeLocator({count: 0});
+        },
+        getByText(value) { return this.getByRole("button", {name: value}); },
+        getByLabel() { return fakeLocator({count: 0}); },
+        getByPlaceholder(value) { return /标题/.test(String(value)) ? fakeLocator({onFill: async (value) => { title = value; }}) : fakeLocator({count: 0}); },
+        locator(value) { return /contenteditable/.test(String(value)) ? fakeLocator({onFill: async (value) => { content = value; }}) : fakeLocator({count: 0}); },
+      },
+    };
+    const result = await runFanqiePublishJob({
+      browser: {tabs: {async selected() { return tab; }}},
+      jobPath,
+      confirmation: "PUBLISH batch-test",
+      actionConfirmation: "WRITE batch-test",
+      chapterConfirmations: {"1": "SUBMIT batch-test:1:hash"},
+      submit: true,
+    });
+    assert.equal(result.status, "submitted");
+    assert.equal(result.chapters[0].status, "updated");
+    assert.equal(result.chapters[0].platform_id, "7675641066854302233");
+    assert.equal(title, "第一章");
+    assert.equal(content, "正文");
   });
 });

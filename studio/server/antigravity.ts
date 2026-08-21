@@ -118,7 +118,7 @@ export class AntigravityRunner extends EventEmitter {
   private readonly executable: string | null;
   private readonly prefixArgs: string[];
   private readonly processes = new Map<string, ChildProcessByStdio<null, Readable, Readable>>();
-  private readonly heartbeatTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private readonly streamBuffers = new Map<string, {stdout: string; stderr: string}>();
   private readonly diagnosticLogs = new Map<string, string>();
   private readonly pausedRuns = new Set<string>();
   private readonly autoCorrectionRetries: number;
@@ -301,7 +301,7 @@ export class AntigravityRunner extends EventEmitter {
       "--add-dir", dirname(job.outputPath),
       "--effort", planning || ["story_foundation", "chapter_design", "draft", "revise_logic", "revise_voice", "revise_continuity", "revise_cold"].includes(job.stage) ? "high" : "medium",
       "-p", instruction,
-      "--output-format", "text",
+      "--output-format", "stream-json",
       "--mode", "accept-edits",
       "--log-file", logPath,
     ];
@@ -312,19 +312,14 @@ export class AntigravityRunner extends EventEmitter {
     this.event(job.id, "info", `已隔离装载当前作品、阶段 Prompt 与输出目录`);
     this.event(job.id, "info", `Antigravity 已领取 ${job.stage} 阶段，正在分析输入`);
     if (feedback.length) this.event(job.id, "info", `已带入 ${feedback.length} 条用户修改反馈`);
-    const heartbeatStarted = Date.now();
-    this.heartbeatTimers.set(job.id, setInterval(() => {
-      const seconds = Math.max(1, Math.floor((Date.now() - heartbeatStarted) / 1000));
-      const phase = seconds < 30 ? "分析阶段约束与上下文" : seconds < 90 ? "生成并整理结构化产物" : "仍在生成；长正文或高强度推理通常更久";
-      this.event(job.id, "info", `运行 ${seconds} 秒 · ${phase}`);
-    }, 15_000));
+    this.streamBuffers.set(job.id, {stdout: "", stderr: ""});
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => this.event(job.id, "stdout", String(chunk)));
-    child.stderr.on("data", (chunk) => this.event(job.id, "stderr", String(chunk)));
+    child.stdout.on("data", (chunk) => this.handleCliChunk(job.id, "stdout", String(chunk)));
+    child.stderr.on("data", (chunk) => this.handleCliChunk(job.id, "stderr", String(chunk)));
     child.once("error", (error) => {
       this.processes.delete(job.id);
-      this.clearHeartbeat(job.id);
+      this.flushCliStream(job.id);
       const status = AUTH_PATTERN.test(error.message) ? "auth_required" : "failed";
       this.store.updateJob(job.id, { status, error: error.message, finishedAt: new Date().toISOString() });
       this.event(job.id, "error", error.message);
@@ -334,7 +329,7 @@ export class AntigravityRunner extends EventEmitter {
 
   private async finish(jobId: string, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     this.processes.delete(jobId);
-    this.clearHeartbeat(jobId);
+    this.flushCliStream(jobId);
     const logPath = this.diagnosticLogs.get(jobId);
     this.diagnosticLogs.delete(jobId);
     const hiddenLog = logPath ? await readFile(logPath, "utf8").catch(() => "") : "";
@@ -421,7 +416,7 @@ export class AntigravityRunner extends EventEmitter {
     const child = this.processes.get(jobId);
     if (child && !child.killed) child.kill("SIGTERM");
     this.processes.delete(jobId);
-    this.clearHeartbeat(jobId);
+    this.flushCliStream(jobId);
     const cancelled = this.store.updateJob(jobId, { status: "cancelled", error: "用户取消；工作流未推进", finishedAt: new Date().toISOString() });
     this.event(jobId, "info", "任务已取消；工作流保持在当前阶段");
     return cancelled;
@@ -462,10 +457,75 @@ export class AntigravityRunner extends EventEmitter {
     this.emit("job-event", event);
   }
 
-  private clearHeartbeat(jobId: string): void {
-    const timer = this.heartbeatTimers.get(jobId);
-    if (timer) clearInterval(timer);
-    this.heartbeatTimers.delete(jobId);
+  private handleCliChunk(jobId: string, channel: "stdout" | "stderr", chunk: string): void {
+    const buffers = this.streamBuffers.get(jobId) || {stdout: "", stderr: ""};
+    buffers[channel] += chunk;
+    const lines = buffers[channel].split(/\r?\n/);
+    buffers[channel] = lines.pop() || "";
+    this.streamBuffers.set(jobId, buffers);
+    for (const line of lines) this.emitCliLine(jobId, channel, line);
+  }
+
+  private flushCliStream(jobId: string): void {
+    const buffers = this.streamBuffers.get(jobId);
+    if (!buffers) return;
+    if (buffers.stdout.trim()) this.emitCliLine(jobId, "stdout", buffers.stdout);
+    if (buffers.stderr.trim()) this.emitCliLine(jobId, "stderr", buffers.stderr);
+    this.streamBuffers.delete(jobId);
+  }
+
+  private emitCliLine(jobId: string, channel: "stdout" | "stderr", rawLine: string): void {
+    const line = rawLine.trim();
+    if (!line) return;
+    if (channel === "stderr") {
+      this.event(jobId, "stderr", line.slice(0, 8_000));
+      return;
+    }
+    try {
+      const payload = JSON.parse(line) as Record<string, any>;
+      const eventName = String(payload.event || payload.type || "event");
+      if (eventName === "init") {
+        const init = payload.init || {};
+        const conversation = String(payload.conversation_id || init.conversation_id || "").slice(0, 12);
+        const cwd = String(init.cwd || "");
+        this.event(jobId, "stdout", `CLI 会话已建立${conversation ? ` · ${conversation}` : ""}${cwd ? ` · ${cwd}` : ""}`);
+        return;
+      }
+      if (eventName === "step_update") {
+        const step = payload.step_update || {};
+        const type = String(step.step_type || step.type || "step");
+        const labels: Record<string, string> = {
+          user_input: "接收任务", checkpoint: "建立检查点", agent_response: "生成回复",
+          tool_call: "调用工具", tool_result: "工具返回", file_read: "读取文件", file_write: "写入产物",
+        };
+        const textDelta = String(step.text_delta || step.content || step.message || "").trim();
+        const toolName = String(step.tool_name || step.name || step.tool?.name || "");
+        const path = String(step.path || step.file_path || step.tool?.path || "");
+        const duration = Number(step.duration_seconds);
+        const detail = [labels[type] || type, toolName, path, textDelta, Number.isFinite(duration) ? `${duration.toFixed(1)} 秒` : "", step.state && step.state !== "DONE" ? String(step.state) : ""].filter(Boolean).join(" · ");
+        this.event(jobId, "stdout", detail.slice(0, 8_000));
+        return;
+      }
+      if (eventName === "result") {
+        const result = payload.result || payload;
+        const usage = result.usage || payload.usage || {};
+        const totalTokens = Number(usage.total_tokens || usage.input_tokens + usage.output_tokens);
+        const duration = Number(result.duration_seconds || payload.duration_seconds);
+        const turns = Number(result.num_turns || payload.num_turns);
+        const detail = [
+          `CLI 完成 · ${String(result.status || payload.status || "unknown").toUpperCase()}`,
+          Number.isFinite(duration) ? `${duration.toFixed(1)} 秒` : "",
+          Number.isFinite(turns) ? `${turns} 轮` : "",
+          Number.isFinite(totalTokens) ? `${totalTokens.toLocaleString()} tokens` : "",
+        ].filter(Boolean).join(" · ");
+        this.event(jobId, "stdout", detail);
+        return;
+      }
+      const message = String(payload.message || payload.text_delta || payload.status || "").trim();
+      this.event(jobId, "stdout", `${eventName}${message ? ` · ${message}` : ""}`.slice(0, 8_000));
+    } catch {
+      this.event(jobId, "stdout", line.slice(0, 8_000));
+    }
   }
 
   private scheduleCorrectionRetry(jobId: string): void {

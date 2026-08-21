@@ -51,3 +51,41 @@ test("confirmation tokens are single-use and stored by hash", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("batch confirmations are consumed atomically", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tomota-studio-confirm-batch-"));
+  try {
+    const store = new StudioStore(root);
+    store.recordConfirmation("publish", "batch-two", "PUBLISH batch-two");
+    store.recordConfirmation("write", "batch-two", "WRITE batch-two");
+    const items = [
+      {operation: "publish", targetId: "batch-two", token: "PUBLISH batch-two"},
+      {operation: "write", targetId: "batch-two", token: "WRITE batch-two"},
+      {operation: "submit", targetId: "batch-two", token: "SUBMIT batch-two:1:abcdef123456"},
+    ];
+    assert.equal(store.consumeConfirmations(items), false);
+    assert.equal(store.consumeConfirmation("publish", "batch-two", "PUBLISH batch-two"), true, "failed group must not consume earlier rows");
+    store.recordConfirmation("publish", "batch-two", "PUBLISH batch-two");
+    store.recordConfirmation("submit", "batch-two", "SUBMIT batch-two:1:abcdef123456");
+    assert.equal(store.consumeConfirmations(items), true);
+    assert.equal(store.consumeConfirmations(items), false, "successful group remains single-use");
+    store.db.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("authoritative chapter sync replaces inferred placeholder ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tomota-studio-chapter-sync-"));
+  try {
+    const store = new StudioStore(root);
+    const account = store.createFanqieAccount("账号", join(root, "profile"), "account-one");
+    const base = {workId: "7675620772693429273", chapterNumber: 4, title: "旧抄本", status: "已发布", wordCount: 1534, scheduledAt: null, contentHash: "", syncedAt: new Date().toISOString()};
+    store.upsertChapters(account.id, [{...base, platformId: "7675620772693429273-4"}]);
+    store.replaceWorkChapters(account.id, base.workId, [{...base, platformId: "7675893913663586840"}]);
+    assert.deepEqual(store.listChapters(base.workId, account.id).map((item) => item.platformId), ["7675893913663586840"]);
+    store.db.close();
+  } finally {
+    await rm(root, {recursive: true, force: true});
+  }
+});

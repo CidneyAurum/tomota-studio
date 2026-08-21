@@ -21,6 +21,7 @@ test("Studio renders real projects and its primary work surfaces at desktop and 
     assert.match(await page.locator("body").innerText(), /每一章，都留下通过的证据/);
     assert.ok(await page.getByText("纯白残响", { exact: true }).count() >= 1);
     assert.ok(await page.getByText("第十三响后，死去的少女寄来了信", { exact: true }).count() >= 1);
+    await page.locator(".book-card").filter({hasText: "第十三响后，死去的少女寄来了信"}).click();
     assert.equal(await page.getByRole("button", { name: /新建作品/ }).count(), 1);
     await page.getByRole("button", {name: /新建作品/}).click();
     assert.equal(await page.getByRole("dialog", {name: "新建作品"}).count(), 1);
@@ -35,7 +36,7 @@ test("Studio renders real projects and its primary work surfaces at desktop and 
     await page.getByRole("button", { name: /全书与分卷/ }).click();
     assert.equal(await page.getByRole("heading", { name: "全书 · 分卷 · 章节" }).count(), 1);
     assert.ok(await page.getByText("全书", { exact: true }).count() >= 1);
-    assert.ok(await page.getByText("第一卷", { exact: true }).count() >= 1);
+    await page.locator(".volume-node").first().waitFor({state: "visible", timeout: 5_000});
     assert.match(await page.locator("body").innerText(), /已规划范围只是下一段可执行路线，不等于全书完结章数/);
     await page.getByRole("button", {name: /AI 共创全书/}).click();
     assert.equal(await page.getByRole("dialog", {name: "全书总纲 AI 共创"}).count(), 1);
@@ -51,13 +52,15 @@ test("Studio renders real projects and its primary work surfaces at desktop and 
     assert.equal(await page.getByRole("heading", { name: "严格写作流水线" }).count(), 1);
     assert.equal(await page.getByLabel("当前阶段修改反馈").count(), 1);
     assert.equal(await page.getByText("修改反馈", { exact: true }).count(), 1);
+    assert.equal(await page.getByLabel("返工章节").count(), 1);
+    assert.equal(await page.getByRole("button", {name: "按要求返工此章"}).count(), 1);
     assert.equal(await page.getByLabel("章节号").count(), 0);
     const picker = page.locator(".chapter-picker");
     if (await picker.count()) {
       await picker.locator("summary").click();
       assert.equal(await page.getByText("本次处理哪些章节？", { exact: true }).count(), 1);
       assert.match(await page.locator("body").innerText(), /这里只决定本次任务队列，不代表小说将在这些章节完结/);
-      assert.ok(await page.getByText("已有正文 · 待严格审查", {exact: true}).count() >= 2);
+      assert.ok(await picker.locator('input[type="checkbox"]').count() >= 4);
     }
     await page.screenshot({ path: join(process.cwd(), "..", ".tomota-studio", "studio-workflow.png"), fullPage: true });
     await page.getByRole("button", { name: /作品工作区/ }).click();
@@ -66,8 +69,8 @@ test("Studio renders real projects and its primary work surfaces at desktop and 
     assert.equal(await page.getByText("audit", {exact: true}).count(), 0);
     assert.ok(await page.getByRole("option", {name: "正文"}).count() >= 1);
     await page.locator(".file-list").getByText("chapter-0003.md", {exact: true}).click();
-    assert.equal(await page.getByText("尚未严格审查", {exact: true}).count(), 1);
-    assert.equal(await page.getByText("正文已经存在，但还没有严格审查报告", {exact: true}).count(), 1);
+    assert.equal(await page.getByText("0 条开放证据", {exact: true}).count(), 1);
+    assert.equal(await page.getByText("当前索引中没有开放审查证据", {exact: true}).count(), 1);
     await page.screenshot({ path: join(process.cwd(), "..", ".tomota-studio", "studio-workspace.png"), fullPage: true });
     await page.getByRole("button", { name: /番茄运营/ }).click();
     assert.equal(await page.getByRole("heading", { name: "番茄作品运营" }).count(), 1);
@@ -76,6 +79,16 @@ test("Studio renders real projects and its primary work surfaces at desktop and 
     assert.equal(await page.getByText("作品资料与封面", { exact: true }).count(), 1);
     assert.equal(await page.getByRole("combobox", {name: "番茄账号"}).count(), 1);
     assert.equal(await page.getByRole("button", {name: /添加账号/}).count(), 1);
+    await page.locator(".metadata-form select").first().waitFor({state: "visible"});
+    await page.waitForFunction(() => Boolean((document.querySelector(".metadata-form select") as HTMLSelectElement | null)?.value));
+    const oneClick = page.getByRole("button", {name: /一键上传\/替换并提交/});
+    assert.equal(await oneClick.count(), 1);
+    assert.equal(await oneClick.isEnabled(), true);
+    assert.match(await oneClick.innerText(), /提交 4 章/);
+    assert.equal(await page.getByRole("button", {name: "仅生成核对预览"}).count(), 1);
+    assert.equal(await page.locator(".confirm-fields input").count(), 0);
+    assert.ok(Number.parseFloat(await page.locator("body").evaluate((node) => getComputedStyle(node).fontSize)) >= 16);
+    assert.notEqual(await page.locator(".panel").first().evaluate((node) => getComputedStyle(node).backdropFilter), "none");
     await page.screenshot({ path: join(process.cwd(), "..", ".tomota-studio", "studio-fanqie.png"), fullPage: true });
     await page.getByRole("button", { name: /系统设置/ }).click();
     assert.match(await page.locator("body").innerText(), /CLI 已安装|已连接，可以运行|Google 拒绝当前网络地区|当前不可运行/);

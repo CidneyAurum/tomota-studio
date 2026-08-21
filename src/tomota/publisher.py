@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .browser_job import BrowserJobManager
+from .browser_job import BrowserJobManager, publication_content
 from .models import PublishBatch, PublishResult
 from .store import ProjectStore
 
@@ -77,7 +77,7 @@ class FanqiePublisher:
                     "chapter_number": number,
                     "title": self.store.get_chapter(book_id, number)["title"],
                     "word_count": self.store.get_chapter(book_id, number)["word_count"],
-                    "content_fingerprint": self.store.get_chapter(book_id, number)["content_hash"],
+                    "content_fingerprint": hashlib.sha256(publication_content(self.store.read_content(book_id, number)).encode("utf-8")).hexdigest(),
                     "scheduled_at": schedule.get(str(number)),
                 }
                 for number in chapter_numbers

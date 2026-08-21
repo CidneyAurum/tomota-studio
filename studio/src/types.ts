@@ -148,7 +148,16 @@ export interface BatchPreview {
   book_id: string;
   book_title: string;
   status: string;
-  chapters: Array<{chapter_number: number; title: string; word_count: number; content_fingerprint: string; scheduled_at?: string | null}>;
+  chapters: Array<{chapter_number: number; title: string; word_count: number; content_fingerprint: string; scheduled_at?: string | null; operation?: "create" | "update"; platform_chapter_id?: string | null; platform_status?: string | null; platform_title?: string | null; platform_word_count?: number | null}>;
   next_confirmation: string;
   platform_work_id?: string;
+  platform_work_title?: string;
+}
+
+export interface FanqieWriteWindow {
+  allowed: boolean;
+  timezone: "Asia/Shanghai";
+  currentTime: string;
+  nextAllowedAt: string | null;
+  message: string;
 }

@@ -113,6 +113,7 @@ export class StudioStore {
         chapter_number INTEGER,
         title TEXT NOT NULL,
         status TEXT NOT NULL,
+        word_count INTEGER NOT NULL DEFAULT 0,
         scheduled_at TEXT,
         content_hash TEXT NOT NULL DEFAULT '',
         synced_at TEXT NOT NULL
@@ -173,6 +174,7 @@ export class StudioStore {
     `);
     this.ensureColumn("platform_works", "account_id", "TEXT NOT NULL DEFAULT 'legacy'");
     this.ensureColumn("platform_chapters", "account_id", "TEXT NOT NULL DEFAULT 'legacy'");
+    this.ensureColumn("platform_chapters", "word_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("platform_sync_runs", "account_id", "TEXT NOT NULL DEFAULT 'legacy'");
     this.ensureColumn("work_write_previews", "account_id", "TEXT NOT NULL DEFAULT 'legacy'");
     this.ensureColumn("fanqie_accounts", "last_sync_status", "TEXT NOT NULL DEFAULT 'idle'");
@@ -203,6 +205,10 @@ export class StudioStore {
     this.db.prepare(
       "INSERT INTO studio_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
     ).run(key, value, isoNow());
+  }
+
+  deleteMeta(key: string): void {
+    this.db.prepare("DELETE FROM studio_meta WHERE key=?").run(key);
   }
 
   createJob(value: Omit<AgentJob, "id" | "createdAt" | "startedAt" | "finishedAt" | "pid" | "exitCode" | "outputHash" | "error">): AgentJob {
@@ -387,10 +393,22 @@ export class StudioStore {
 
   upsertChapters(accountId: string, chapters: PlatformChapter[]): void {
     const statement = this.db.prepare(`
-      INSERT INTO platform_chapters(platform_id,account_id,work_id,chapter_number,title,status,scheduled_at,content_hash,synced_at) VALUES(?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(platform_id) DO UPDATE SET account_id=excluded.account_id,work_id=excluded.work_id,chapter_number=excluded.chapter_number,title=excluded.title,status=excluded.status,scheduled_at=excluded.scheduled_at,content_hash=excluded.content_hash,synced_at=excluded.synced_at
+      INSERT INTO platform_chapters(platform_id,account_id,work_id,chapter_number,title,status,word_count,scheduled_at,content_hash,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(platform_id) DO UPDATE SET account_id=excluded.account_id,work_id=excluded.work_id,chapter_number=excluded.chapter_number,title=excluded.title,status=excluded.status,word_count=excluded.word_count,scheduled_at=excluded.scheduled_at,content_hash=excluded.content_hash,synced_at=excluded.synced_at
     `);
-    for (const chapter of chapters) statement.run(chapter.platformId, accountId, chapter.workId, chapter.chapterNumber, chapter.title, chapter.status, chapter.scheduledAt, chapter.contentHash, chapter.syncedAt);
+    for (const chapter of chapters) statement.run(chapter.platformId, accountId, chapter.workId, chapter.chapterNumber, chapter.title, chapter.status, Number(chapter.wordCount || 0), chapter.scheduledAt, chapter.contentHash, chapter.syncedAt);
+  }
+
+  replaceWorkChapters(accountId: string, workId: string, chapters: PlatformChapter[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM platform_chapters WHERE account_id=? AND work_id=?").run(accountId, workId);
+      this.upsertChapters(accountId, chapters);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   listChapters(workId?: string, accountId?: string): PlatformChapter[] {
@@ -401,7 +419,7 @@ export class StudioStore {
     return (rows as Array<Record<string, unknown>>).map((row) => ({
       platformId: String(row.platform_id), workId: String(row.work_id), chapterNumber: row.chapter_number === null ? null : Number(row.chapter_number),
       title: String(row.title), status: String(row.status), scheduledAt: row.scheduled_at === null ? null : String(row.scheduled_at),
-      contentHash: String(row.content_hash || ""), syncedAt: String(row.synced_at),
+      wordCount: Number(row.word_count || 0), contentHash: String(row.content_hash || ""), syncedAt: String(row.synced_at),
     }));
   }
 
@@ -429,6 +447,35 @@ export class StudioStore {
     if (!row?.id) return false;
     this.db.prepare("UPDATE operation_confirmations SET consumed_at=? WHERE id=?").run(isoNow(), row.id);
     return true;
+  }
+
+  consumeConfirmations(items: Array<{operation: string; targetId: string; token: string}>): boolean {
+    if (!items.length) return false;
+    const selected: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const item of items) {
+        const hash = createHash("sha256").update(item.token).digest("hex");
+        const row = this.db.prepare("SELECT id FROM operation_confirmations WHERE operation=? AND target_id=? AND token_hash=? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1")
+          .get(item.operation, item.targetId, hash) as {id?: string} | undefined;
+        if (!row?.id || selected.includes(row.id)) {
+          this.db.exec("ROLLBACK");
+          return false;
+        }
+        selected.push(row.id);
+      }
+      const consumedAt = isoNow();
+      const update = this.db.prepare("UPDATE operation_confirmations SET consumed_at=? WHERE id=? AND consumed_at IS NULL");
+      for (const id of selected) {
+        const result = update.run(consumedAt, id);
+        if (Number(result.changes) !== 1) throw new Error("即时确认已被其他操作使用");
+      }
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
   createWorkWrite(accountId: string, bookId: string, platformWorkId: string, payload: Record<string, unknown>, payloadHash: string): Record<string, unknown> {

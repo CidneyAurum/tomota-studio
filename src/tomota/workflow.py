@@ -69,6 +69,58 @@ class WorkflowEngine:
         self.next_action(run.run_id)
         return run
 
+    def start_rework(self, book_id: str, chapter_number: int, feedback: str, *, max_revisions: int = 5) -> WorkflowRun:
+        """Start an author-directed rework without destroying the approved version.
+
+        Rework deliberately begins at chapter design so the requested change is
+        reflected in scene structure before a new draft is produced.  The old
+        body and review report remain in their authoritative locations until the
+        replacement passes every gate.
+        """
+        self.store.initialize()
+        if not self.store.get_book(book_id):
+            raise WorkflowError(f"book does not exist: {book_id}")
+        chapter_number = int(chapter_number)
+        if chapter_number <= 0:
+            raise WorkflowError("chapter_number 必须是正整数")
+        feedback = str(feedback).strip()
+        if not feedback or len(feedback) > 4000:
+            raise WorkflowError("返工要求必须为 1—4000 个字符")
+        if not 1 <= max_revisions <= 5:
+            raise WorkflowError("max_revisions 必须在 1 到 5 之间")
+        self._contract(book_id, chapter_number)
+        chapter = self.store.get_chapter(book_id, chapter_number)
+        if not chapter or chapter.get("status") not in {"approved", "reviewed_pending_approval", "scheduled", "submitted", "published"}:
+            raise WorkflowError("只有已经通过审查或已进入发布流程的章节可以发起返工")
+        content = self.store.read_content(book_id, chapter_number).strip()
+        if not content:
+            raise WorkflowError("已通过章节缺少可返工的正文")
+        run = WorkflowRun(
+            run_id=f"workflow-{uuid.uuid4().hex[:12]}", book_id=book_id, chapter_numbers=[chapter_number],
+            status="running", current_chapter=chapter_number, current_stage="chapter_design",
+            max_revisions=max_revisions,
+            stage_history=[{"stage": "rework_requested", "result": feedback, "at": utc_now()}],
+        )
+        stage_dir = self._stage_dir(run)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        source_path = stage_dir / "rework-source.md"
+        source_path.write_text(content + "\n", encoding="utf-8")
+        self.store.write_json(stage_dir / "rework-request.json", {
+            "chapter_number": chapter_number,
+            "feedback": feedback,
+            "prior_status": chapter.get("status"),
+            "prior_content_hash": chapter.get("content_hash") or hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "source_path": str(source_path),
+            "requested_at": utc_now(),
+        })
+        self.store.update_chapter_status(book_id, chapter_number, "modified_after_review")
+        self.store.save_workflow_run(run)
+        self.store.append_event(book_id, chapter_number, "chapter_rework_started", {
+            "run_id": run.run_id, "feedback": feedback, "prior_status": chapter.get("status"),
+        })
+        self.next_action(run.run_id)
+        return run
+
     def status(self, run_id: str) -> dict[str, Any]:
         run = self._run(run_id)
         return {
@@ -345,7 +397,13 @@ class WorkflowEngine:
             contract = self._contract(run.book_id, int(run.current_chapter)).to_dict()
             master = self.store.load_master_outline(run.book_id)
             volume = next((item for item in master.get("volumes", []) if item.get("volume_id") == contract.get("volume_id")), {})
-            return {"contract": contract, "master_outline": master, "volume_outline": volume, "story_bible": self._read_json(self.store.book_dir(run.book_id) / "canon" / "story-bible.json"), "canon": self.store.load_canon(run.book_id)}
+            context = {"contract": contract, "master_outline": master, "volume_outline": volume, "story_bible": self._read_json(self.store.book_dir(run.book_id) / "canon" / "story-bible.json"), "canon": self.store.load_canon(run.book_id)}
+            rework_request = self._read_json(self._stage_dir(run) / "rework-request.json")
+            if rework_request:
+                context["author_rework_request"] = rework_request
+                context["approved_text_to_rework"] = (self._stage_dir(run) / "rework-source.md").read_text(encoding="utf-8")
+                context["rework_rule"] = "必须落实作者返工要求，同时保留未被要求改变的有效事实；本轮仍须通过全部质量闸门"
+            return context
         if stage == "design_review":
             return {"design": self._read_json(self._stage_dir(run) / "chapter_design.json"), "contract": self._contract(run.book_id, int(run.current_chapter)).to_dict()}
         if stage == "draft":

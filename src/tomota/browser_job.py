@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .models import PublishBatch, PublishResult, utc_now
 from .store import ProjectStore
+
+
+def publication_content(value: str) -> str:
+    """Return the exact body sent to the platform editor.
+
+    Local Markdown keeps a leading H1 for comfortable editing, while Fanqie
+    stores the chapter title separately.  Removing only that first heading
+    avoids publishing a duplicate ``# 第X章`` line in the body.
+    """
+    lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    first = next((index for index, line in enumerate(lines) if line.strip()), None)
+    if first is not None and re.match(r"^\s*(?:#{1,6}\s*)?第\s*[一二三四五六七八九十百零〇两\d]+\s*章(?:\s+.*)?$", lines[first]):
+        lines.pop(first)
+    cleaned: list[str] = []
+    for line in lines:
+        line = re.sub(r"^\s*#{1,6}\s*", "", line)
+        line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
+        line = re.sub(r"__(.+?)__", r"\1", line)
+        cleaned.append(line.rstrip())
+    return "\n".join(cleaned).strip() + "\n"
 
 
 class BrowserJobError(RuntimeError):
@@ -46,7 +67,8 @@ class BrowserJobManager:
                 raise BrowserJobError(f"chapter {number} does not exist")
             if not self.store.is_release_ready(batch.book_id, number):
                 raise BrowserJobError(f"chapter {number} lacks strict approval evidence: {chapter['status']}")
-            content = self.store.read_content(batch.book_id, number)
+            source_content = self.store.read_content(batch.book_id, number)
+            content = publication_content(source_content)
             if not content.strip():
                 raise BrowserJobError(f"chapter {number} has no content")
             chapters.append(
@@ -57,7 +79,8 @@ class BrowserJobManager:
                     # save_chapter records the fingerprint before adding its
                     # storage newline; reuse that canonical local value so a
                     # browser round-trip cannot look like a content change.
-                    "content_fingerprint": chapter.get("content_hash") or hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "content_fingerprint": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "source_fingerprint": chapter.get("content_hash") or hashlib.sha256(source_content.encode("utf-8")).hexdigest(),
                     "scheduled_at": batch.schedule.get(str(number)),
                     "local_platform_id": chapter.get("platform_id"),
                 }
@@ -124,13 +147,13 @@ class BrowserJobManager:
             local = self.store.get_chapter(batch.book_id, number)
             if not local:
                 raise BrowserJobError(f"local chapter disappeared: {number}")
-            remote_fingerprint = item.get("content_fingerprint")
+            remote_fingerprint = item.get("source_fingerprint") or item.get("content_fingerprint")
             if remote_fingerprint and remote_fingerprint != local.get("content_hash"):
                 raise BrowserJobError(f"content changed after browser job export: chapter {number}")
 
             item_status = str(item.get("status", "failed"))
             message = str(item.get("message", item.get("reason", "")))
-            if item_status in {"submitted", "scheduled", "dry_run"}:
+            if item_status in {"submitted", "updated", "scheduled", "dry_run"}:
                 self.store.update_chapter_status(
                     batch.book_id,
                     number,
@@ -148,12 +171,12 @@ class BrowserJobManager:
                 self.store.append_event(batch.book_id, number, "publish_failed", {"source": "browser", "status": item_status, "message": message})
 
         overall = str(result.get("status", "failed"))
-        if overall not in {"submitted", "partial", "failed", "blocked", "uncertain", "preview", "auth_required", "ui_mismatch", "human_action_required"}:
+        if overall not in {"submitted", "partial", "failed", "blocked", "uncertain", "preview", "auth_required", "ui_mismatch", "human_action_required", "time_window_blocked"}:
             raise BrowserJobError(f"unknown browser result status: {overall}")
         if overall == "submitted" and seen != allowed:
             missing = ", ".join(str(number) for number in sorted(allowed - seen))
             raise BrowserJobError(f"browser result claims submitted but is missing chapters: {missing}")
-        if overall in {"preview", "auth_required", "ui_mismatch", "human_action_required", "blocked", "uncertain"}:
+        if overall in {"preview", "auth_required", "ui_mismatch", "human_action_required", "time_window_blocked", "blocked", "uncertain"}:
             batch_status = "failed" if not submitted else "partial"
         else:
             batch_status = "submitted" if overall == "submitted" and not failed else ("partial" if submitted or skipped else "failed")

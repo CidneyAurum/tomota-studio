@@ -17,6 +17,29 @@ const WRITER_WORDS = /作家中心|作家专区|作品管理|书籍管理|章节
 const EMPTY_WORKS = /暂无作品|还没有作品|创建作品|新建作品|开始创作/;
 const sessionStatusText = (status: FanqieAccount["sessionStatus"]) => ({logged_in: "上次已登录", auth_required: "上次需要登录", human_action_required: "上次需要人工验证", unknown: "上次状态未知"})[status];
 
+export interface FanqieWriteWindow {
+  allowed: boolean;
+  timezone: "Asia/Shanghai";
+  currentTime: string;
+  nextAllowedAt: string | null;
+  message: string;
+}
+
+/** Fanqie's chapter review window is 07:00—24:00 Beijing time. */
+export function fanqieWriteWindow(now = new Date()): FanqieWriteWindow {
+  const chinaMillis = now.getTime() + 8 * 60 * 60 * 1000;
+  const china = new Date(chinaMillis);
+  const hour = china.getUTCHours();
+  const allowed = hour >= 7;
+  const currentTime = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).format(now);
+  if (allowed) return {allowed: true, timezone: "Asia/Shanghai", currentTime, nextAllowedAt: null, message: "当前处于番茄章节审核工作时间，可提交"};
+  const nextAllowedAt = new Date(Date.UTC(china.getUTCFullYear(), china.getUTCMonth(), china.getUTCDate(), 7) - 8 * 60 * 60 * 1000).toISOString();
+  return {allowed: false, timezone: "Asia/Shanghai", currentTime, nextAllowedAt, message: "番茄夜间无法修改或删除章节，请于北京时间 07:00 后提交"};
+}
+
 function browserExecutable(): string | null {
   const candidates = [
     process.env.TOMOTA_CHROME_PATH,
@@ -54,6 +77,7 @@ export interface FanqieSession {
 }
 
 type VisibleAnchor = {href: string; text: string; card: string};
+type ChapterRow = {text: string; hrefs: string[]};
 
 const GENERIC_WORK_LABEL = /^(?:点此了解|章节管理|作品管理|书籍管理|我的作品|创建章节|新建章节|作品相关|数据|编辑|查看|详情|更多|待审核|审核中|已发布|连载中|已完结|草稿|审核失败)$/;
 
@@ -119,6 +143,30 @@ export function parseVisibleWorks(anchors: VisibleAnchor[], html: string, now = 
     }
   }
   return {works: [...workMap.values()], chapters: [...chapterMap.values()]};
+}
+
+export function parseChapterRows(rows: ChapterRow[], workId: string, now = new Date().toISOString()): PlatformChapter[] {
+  const chapters = new Map<string, PlatformChapter>();
+  for (const row of rows) {
+    const match = row.text.replace(/\s+/g, " ").trim().match(/^第\s*(\d+)\s*章\s+(.+?)\s+([\d,]+)\s+\d+\s+(已发布|审核中|待审核|草稿|审核失败)(?:\s+(.+))?$/);
+    if (!match) continue;
+    const modify = row.hrefs.find((href) => /\/publish\/\d+\//.test(href));
+    const preview = row.hrefs.find((href) => /\/preview\//.test(href));
+    const platformId = (modify?.match(/\/publish\/(\d+)\//) || preview?.match(/&(\d+)(?:[/?#]|$)/) || [])[1];
+    if (!platformId) continue;
+    chapters.set(platformId, {
+      platformId,
+      workId,
+      chapterNumber: Number(match[1]),
+      title: match[2].trim(),
+      status: match[4],
+      wordCount: Number(match[3].replaceAll(",", "")),
+      scheduledAt: null,
+      contentHash: "",
+      syncedAt: now,
+    });
+  }
+  return [...chapters.values()].sort((left, right) => Number(left.chapterNumber || 0) - Number(right.chapterNumber || 0));
 }
 
 export class FanqieBrowserService {
@@ -278,12 +326,38 @@ export class FanqieBrowserService {
         return {href: anchor.href, text: clean(anchor.innerText || anchor.textContent), card: clean((card as HTMLElement | null)?.innerText || card?.textContent)};
       }));
       const parsed = parseVisibleWorks(anchors, await page.content(), new Date().toISOString());
+      const chapterDetails: PlatformChapter[] = [];
+      for (const work of parsed.works) {
+        const targetUrl = isOfficialUrl(work.url) && work.url.includes(work.platformId)
+          ? work.url
+          : `https://fanqienovel.com/main/writer/chapter-manage/${work.platformId}`;
+        await page.goto(targetUrl, {waitUntil: "domcontentloaded", timeout: 30_000});
+        await page.waitForLoadState("networkidle", {timeout: 8_000}).catch(() => undefined);
+        await page.waitForTimeout(500);
+        const chapterText = await page.locator("body").innerText({timeout: 10_000});
+        assertSafeText(chapterText);
+        if (/\/login(?:[/?#]|$)/.test(page.url()) || !page.url().includes(work.platformId)) continue;
+        const rows = await page.locator("tr").evaluateAll((nodes) => nodes.map((node) => {
+          const element = node as HTMLElement;
+          return {
+            text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
+            hrefs: [...element.querySelectorAll("a[href]")].map((anchor) => (anchor as HTMLAnchorElement).href),
+          };
+        }));
+        chapterDetails.push(...parseChapterRows(rows, work.platformId, new Date().toISOString()));
+      }
       const priorWorks = this.store.listWorks(account.id);
       const explicitEmpty = EMPTY_WORKS.test(text);
       const works = parsed.works.length || explicitEmpty ? parsed.works : priorWorks;
-      const chapters = parsed.chapters.length || explicitEmpty ? parsed.chapters : this.store.listChapters(undefined, account.id);
+      const detailedChapters = chapterDetails.length ? chapterDetails : parsed.chapters;
+      const priorChapters = this.store.listChapters(undefined, account.id);
+      const priorById = new Map(priorChapters.map((chapter) => [chapter.platformId, chapter]));
+      for (const chapter of detailedChapters) chapter.contentHash = priorById.get(chapter.platformId)?.contentHash || chapter.contentHash;
+      const chapters = detailedChapters.length || explicitEmpty ? detailedChapters : priorChapters;
       if (parsed.works.length) this.store.upsertWorks(account.id, parsed.works);
-      if (parsed.chapters.length) this.store.upsertChapters(account.id, parsed.chapters);
+      if (chapterDetails.length) {
+        for (const work of parsed.works) this.store.replaceWorkChapters(account.id, work.platformId, chapterDetails.filter((chapter) => chapter.workId === work.platformId));
+      } else if (parsed.chapters.length) this.store.upsertChapters(account.id, parsed.chapters);
       const recognized = parsed.works.length > 0 || explicitEmpty;
       const syncMessage = recognized ? `已同步 ${works.length} 部作品` : "账号已登录，但当前页面没有暴露可识别的作品列表；已保留上次结果";
       this.store.finishSync(syncId, recognized ? "succeeded" : "ui_changed", works.length, chapters.length, syncMessage);
@@ -318,7 +392,9 @@ export class FanqieBrowserService {
   async prepareBatch(bookId: string, chapters: number[], platformWorkId: string, options: PublishPlanOptions = {mode: "scheduled"}): Promise<PublishBatchPreview> {
     if (!/^\d{10,}$/.test(platformWorkId)) throw new Error("请选择当前账号同步到的番茄作品");
     const account = this.activeAccount();
-    if (!this.store.listWorks(account.id).some((work) => work.platformId === platformWorkId)) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
+    const platformWork = this.store.listWorks(account.id).find((work) => work.platformId === platformWorkId);
+    if (!platformWork) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
+    await this.preflightPublish(platformWorkId);
     const mode = options.mode === "immediate" ? "immediate" : "scheduled";
     const args = ["release", "--book-id", bookId, "--chapters", chapters.join(","), "--schedule-mode", mode, "--json"];
     if (mode === "scheduled") {
@@ -332,9 +408,130 @@ export class FanqieBrowserService {
     if (!batchId) throw new Error("Tomota 未返回发布批次编号");
     const path = join(this.root, "books", bookId, "publish", `${batchId}.preview.json`);
     const preview = JSON.parse(await readFile(path, "utf8")) as PublishBatchPreview;
+    const platformChapters = this.store.listChapters(platformWorkId, account.id);
+    preview.chapters = preview.chapters.map((chapter) => {
+      const platformChapter = platformChapters.find((item) => item.chapterNumber === chapter.chapter_number);
+      return platformChapter ? {
+        ...chapter,
+        operation: "update" as const,
+        scheduled_at: null,
+        platform_chapter_id: platformChapter.platformId,
+        platform_status: platformChapter.status,
+        platform_title: platformChapter.title,
+        platform_word_count: platformChapter.wordCount || 0,
+      } : {...chapter, operation: "create" as const};
+    });
+    preview.platform_work_id = platformWorkId;
+    preview.platform_work_title = platformWork.title;
+    await writeFile(path, JSON.stringify(preview, null, 2), "utf8");
     this.store.setMeta(`fanqie_batch_account:${batchId}`, account.id);
     this.store.setMeta(`fanqie_batch_work:${batchId}`, platformWorkId);
-    return {...preview, platform_work_id: platformWorkId};
+    this.store.setMeta(`fanqie_book_work:${account.id}:${bookId}`, platformWorkId);
+    this.store.setMeta(`fanqie_book_pending_batch:${account.id}:${bookId}`, batchId);
+    return preview;
+  }
+
+  async pendingBatch(bookId: string): Promise<PublishBatchPreview | null> {
+    if (!/^[A-Za-z0-9_-]+$/.test(bookId)) throw new Error("作品编号无效");
+    const account = this.activeAccount();
+    const batchId = this.store.getMeta(`fanqie_book_pending_batch:${account.id}:${bookId}`);
+    if (!batchId) return null;
+    if (this.store.getMeta(`fanqie_batch_account:${batchId}`) !== account.id) return null;
+    const path = join(this.root, "books", bookId, "publish", `${batchId}.preview.json`);
+    if (!existsSync(path)) return null;
+    const preview = JSON.parse(await readFile(path, "utf8")) as PublishBatchPreview;
+    return preview.status === "preview" ? preview : null;
+  }
+
+  async preflightPublish(platformWorkId: string): Promise<Record<string, unknown>> {
+    if (!/^\d{10,}$/.test(platformWorkId)) throw new Error("请选择当前账号同步到的番茄作品");
+    const account = this.activeAccount();
+    const work = this.store.listWorks(account.id).find((item) => item.platformId === platformWorkId);
+    if (!work) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
+    const targetUrl = isOfficialUrl(work.url) && work.url.includes(platformWorkId)
+      ? work.url
+      : `https://fanqienovel.com/main/writer/chapter-manage/${platformWorkId}`;
+    const page = await this.selectedPage();
+    await page.goto(targetUrl, {waitUntil: "domcontentloaded", timeout: 30_000});
+    await page.waitForLoadState("networkidle", {timeout: 8_000}).catch(() => undefined);
+    await page.waitForTimeout(600);
+    const text = await page.locator("body").innerText({timeout: 10_000});
+    assertSafeText(text);
+    if (/\/login(?:[/?#]|$)/.test(page.url()) || (LOGIN_WORDS.test(text) && !WRITER_WORDS.test(text))) {
+      throw Object.assign(new Error("番茄登录已失效，请在可见浏览器完成登录后重试"), {code: "auth_required"});
+    }
+    if (!page.url().includes(platformWorkId) || !WRITER_WORDS.test(text)) {
+      throw Object.assign(new Error("未能进入当前批次绑定的作品章节页，请先重新同步"), {code: "ui_mismatch"});
+    }
+    const createEntry = await this.firstLocator([
+      page.getByRole("button", {name: /新建章节|新增章节|创建章节|写新章节/}),
+      page.getByRole("link", {name: /新建章节|新增章节|创建章节|写新章节/}),
+      page.getByText(/新建章节|新增章节|创建章节|写新章节/),
+    ]);
+    if (!createEntry) throw Object.assign(new Error("番茄章节页未识别到“新建章节”入口；页面可能已改版，未创建发布批次"), {code: "ui_mismatch"});
+    return {status: "ready", platformWorkId, targetUrl: page.url(), message: "登录、目标作品与新建章节入口均已核验"};
+  }
+
+  async inspectChapterPage(platformWorkId: string): Promise<Record<string, unknown>> {
+    await this.preflightPublish(platformWorkId);
+    const page = await this.selectedPage(false);
+    const controls = await page.locator("a,button").evaluateAll((nodes) => nodes.map((node) => {
+      const element = node as HTMLElement;
+      const anchor = node instanceof HTMLAnchorElement ? node : null;
+      return {
+        tag: element.tagName.toLowerCase(),
+        text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160),
+        href: anchor?.href || "",
+      };
+    }).filter((item) => item.text && /章|编辑|修改|发布|草稿|审核/.test(item.text)).slice(0, 120));
+    const rows = await page.locator('tr,li,[class*="chapter" i],[class*="catalog" i]').evaluateAll((nodes) => nodes.map((node) => {
+      const element = node as HTMLElement;
+      return {
+        tag: element.tagName.toLowerCase(),
+        className: String(element.className || "").slice(0, 160),
+        text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
+        hrefs: [...element.querySelectorAll("a[href]")].map((anchor) => (anchor as HTMLAnchorElement).href).slice(0, 8),
+      };
+    }).filter((item) => item.text && /第?\s*\d+\s*章|编辑|修改|已发布|草稿|审核/.test(item.text)).slice(0, 120));
+    return {status: "ready", platformWorkId, url: page.url(), controls, rows};
+  }
+
+  async inspectChapterEditor(platformWorkId: string, platformChapterId: string, advance = false): Promise<Record<string, unknown>> {
+    if (!/^\d{10,}$/.test(platformWorkId) || !/^\d{10,}$/.test(platformChapterId)) throw new Error("平台作品或章节编号无效");
+    const chapter = this.store.listChapters(platformWorkId, this.activeAccount().id).find((item) => item.platformId === platformChapterId);
+    if (!chapter) throw new Error("该章节不属于当前账号同步到的目标作品");
+    const page = await this.selectedPage();
+    const url = `https://fanqienovel.com/main/writer/${platformWorkId}/publish/${platformChapterId}/?enter_from=modifychapter`;
+    await page.goto(url, {waitUntil: "domcontentloaded", timeout: 30_000});
+    await page.waitForLoadState("networkidle", {timeout: 8_000}).catch(() => undefined);
+    await page.waitForTimeout(2_500);
+    let text = await page.locator("body").innerText({timeout: 10_000});
+    assertSafeText(text);
+    if (/\/login(?:[/?#]|$)/.test(page.url()) || !page.url().includes(platformChapterId)) throw Object.assign(new Error("未能进入已绑定章节的修改页"), {code: "auth_required"});
+    if (advance) {
+      const next = page.getByRole("button", {name: /^下一步$/}).first();
+      if (!(await next.count())) throw Object.assign(new Error("修改页未识别到“下一步”按钮"), {code: "ui_mismatch"});
+      await next.click();
+      await page.waitForTimeout(1_000);
+      text = await page.locator("body").innerText({timeout: 10_000});
+      assertSafeText(text);
+    }
+    const fields = await page.locator('input,textarea,[contenteditable="true"]').evaluateAll((nodes) => nodes.map((node) => {
+      const element = node as HTMLElement;
+      return {
+        tag: element.tagName.toLowerCase(),
+        type: element.getAttribute("type") || "",
+        name: element.getAttribute("name") || "",
+        placeholder: element.getAttribute("placeholder") || "",
+        ariaLabel: element.getAttribute("aria-label") || "",
+        className: String(element.className || "").slice(0, 180),
+        contenteditable: element.getAttribute("contenteditable") || "",
+        textLength: String(element.innerText || "").length,
+      };
+    }).slice(0, 80));
+    const buttons = await page.locator("button").evaluateAll((nodes) => nodes.map((node) => String((node as HTMLElement).innerText || node.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 80));
+    const frames = page.frames().map((frame) => ({name: frame.name(), url: frame.url()}));
+    return {status: "ready", step: advance ? "submit" : "editor", platformWorkId, platformChapterId, url: page.url(), bodyPreview: text.replace(/\s+/g, " ").trim().slice(0, 1400), fields, buttons, frames};
   }
 
   async prepareWorkWrite(bookId: string, platformWorkId: string, requested: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -361,8 +558,10 @@ export class FanqieBrowserService {
     }
     const account = this.activeAccount();
     const currentWork = this.store.listWorks(account.id).find((item) => item.platformId === platformWorkId);
+    if (!currentWork) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
     const material = JSON.stringify({bookId, platformWorkId, payload});
     const preview = this.store.createWorkWrite(account.id, bookId, platformWorkId, payload, createHash("sha256").update(material).digest("hex"));
+    this.store.setMeta(`fanqie_book_work:${account.id}:${bookId}`, platformWorkId);
     return { ...preview, current: currentWork || null, changedFields: ["title", "synopsis", "tags", ...(coverPath ? ["cover"] : [])] };
   }
 
@@ -413,27 +612,55 @@ export class FanqieBrowserService {
   }
 
   async executeBatch(batchId: string, confirmation: string, actionConfirmation: string, chapterConfirmations: Record<string, string>): Promise<Record<string, unknown>> {
+    const writeWindow = fanqieWriteWindow();
+    if (!writeWindow.allowed) throw Object.assign(new Error(writeWindow.message), {code: "time_window_blocked", writeWindow});
     const accountId = this.store.getMeta(`fanqie_batch_account:${batchId}`);
     if (accountId && accountId !== this.activeAccount().id) throw new Error("当前番茄账号与发布批次不一致，请切回生成批次时的账号");
-    if (!this.store.consumeConfirmation("publish", batchId, confirmation)) throw new Error("缺少当前批次的有效 PUBLISH 确认");
-    if (!this.store.consumeConfirmation("write", batchId, actionConfirmation)) throw new Error("缺少实际写入前的有效 WRITE 确认");
     const batchSearch = await this.findBatch(batchId);
     const preview = batchSearch.preview;
+    const expectedPublish = `PUBLISH ${batchId}`;
+    const expectedWrite = `WRITE ${batchId}`;
+    if (confirmation !== expectedPublish || actionConfirmation !== expectedWrite) throw new Error("上传确认与当前批次不一致，请重新核对批次");
+    const confirmationItems = [
+      {operation: "publish", targetId: batchId, token: confirmation},
+      {operation: "write", targetId: batchId, token: actionConfirmation},
+    ];
     for (const chapter of preview.chapters) {
       const token = chapterConfirmations[String(chapter.chapter_number)] || "";
-      if (!this.store.consumeConfirmation("submit", batchId, token)) throw new Error(`第 ${chapter.chapter_number} 章缺少当前内容哈希对应的 SUBMIT 确认`);
+      const expected = `SUBMIT ${batchId}:${chapter.chapter_number}:${String(chapter.content_fingerprint).slice(0, 12)}`;
+      if (token !== expected) throw new Error(`第 ${chapter.chapter_number} 章的上传确认与当前正文不一致，请重新生成预览`);
+      confirmationItems.push({operation: "submit", targetId: batchId, token});
     }
-    const exported = await this.python.run<{job: string}>(["fanqie", "export", "--batch", batchId, "--confirm", confirmation, "--json"]);
     const platformWorkId = this.store.getMeta(`fanqie_batch_work:${batchId}`);
     if (!platformWorkId || !/^\d{10,}$/.test(platformWorkId)) throw new Error("发布批次没有绑定明确的平台作品，已停止");
+    const platformWork = this.store.listWorks(this.activeAccount().id).find((work) => work.platformId === platformWorkId);
+    if (!platformWork) throw new Error("批次绑定的作品不在当前账号同步结果中，请先重新同步");
+    const exported = await this.python.run<{job: string}>(["fanqie", "export", "--batch", batchId, "--confirm", confirmation, "--json"]);
     const jobPath = resolve(String(exported.value.job));
     const publishRoot = resolve(this.root, "books");
     if (!jobPath.startsWith(publishRoot + "\\") && !jobPath.startsWith(publishRoot + "/")) throw new Error("发布任务路径越界，已停止");
     const job = JSON.parse(await readFile(jobPath, "utf8")) as Record<string, unknown>;
     job.schema_version = 3;
     job.platform_work_id = platformWorkId;
-    job.writer_url = `https://fanqienovel.com/main/writer/chapter-manage/${platformWorkId}`;
+    job.writer_url = isOfficialUrl(platformWork.url) && platformWork.url.includes(platformWorkId)
+      ? platformWork.url
+      : `https://fanqienovel.com/main/writer/chapter-manage/${platformWorkId}`;
+    if (!Array.isArray(job.chapters)) throw new Error("发布任务缺少章节内容，已停止");
+    job.chapters = (job.chapters as Array<Record<string, unknown>>).map((chapter) => {
+      const planned = preview.chapters.find((item) => item.chapter_number === Number(chapter.chapter_number));
+      if (!planned) throw new Error(`第 ${String(chapter.chapter_number)} 章不在当前替换预览中`);
+      if (planned.operation !== "update" || !planned.platform_chapter_id) return {...chapter, operation: "create"};
+      return {
+        ...chapter,
+        operation: "update",
+        scheduled_at: null,
+        local_platform_id: planned.platform_chapter_id,
+        platform_chapter_id: planned.platform_chapter_id,
+        modify_url: `https://fanqienovel.com/main/writer/${platformWorkId}/publish/${planned.platform_chapter_id}/?enter_from=modifychapter`,
+      };
+    });
     await writeFile(jobPath, JSON.stringify(job, null, 2), "utf8");
+    if (!this.store.consumeConfirmations(confirmationItems)) throw new Error("本次一键上传确认已失效，请重新点击上传");
     const page = await this.selectedPage();
     const bridge = this.browserAdapter(page);
     const driverUrl = new URL("../../scripts/fanqie_browser_driver.mjs", import.meta.url);
@@ -442,6 +669,9 @@ export class FanqieBrowserService {
     const resultStatus = String(result.status || "failed");
     if (["submitted", "partial"].includes(resultStatus)) {
       await this.python.run(["fanqie", "reconcile", "--batch", batchId, "--json"], { allowExitCodes: [2] });
+    }
+    if (resultStatus === "submitted" && this.store.getMeta(`fanqie_book_pending_batch:${this.activeAccount().id}:${preview.book_id}`) === batchId) {
+      this.store.deleteMeta(`fanqie_book_pending_batch:${this.activeAccount().id}:${preview.book_id}`);
     }
     return result;
   }

@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 
 import { api, post } from "./api";
-import type { AgentJob, BatchPreview, FanqieAccount, FanqieSession, JobEvent, MasterOutline, ProjectDetail, ProjectFile, ProjectSummary, VolumeOutline, WorkflowFeedback } from "./types";
+import type { AgentJob, BatchPreview, FanqieAccount, FanqieSession, FanqieWriteWindow, JobEvent, MasterOutline, ProjectDetail, ProjectFile, ProjectSummary, VolumeOutline, WorkflowFeedback } from "./types";
 
 type View = "overview" | "planning" | "workflow" | "workspace" | "fanqie" | "settings";
 
@@ -422,18 +422,24 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
   const [selectedChapters, setSelectedChapters] = useState<number[]>([]);
   const [logs, setLogs] = useState<JobEvent[]>([]);
   const [feedback, setFeedback] = useState("");
+  const [reworkChapter, setReworkChapter] = useState<number>(0);
   const [feedbackHistory, setFeedbackHistory] = useState<WorkflowFeedback[]>([]);
   const [now, setNow] = useState(Date.now());
+  const terminalRef = useRef<HTMLDivElement>(null);
   const latestJob = detail?.jobs?.[0];
   const workflow = detail?.workflows?.[0];
   const planned = (detail?.chapters || []).map((item: any) => ({...item, contract: item.contract || {}})).sort((a: any, b: any) => Number(a.chapter_number) - Number(b.chapter_number));
   const volumes = detail?.outline?.master?.volumes || [];
   const volumeGroups = volumes.map((volume) => ({volume, chapters: planned.filter((item: any) => String(item.contract?.volume_id || "volume-1") === volume.volume_id)}));
+  const handledChapters = planned.filter((item: any) => chapterAlreadyHandled(String(item.status)));
 
   useEffect(() => {
     const next = planned.find((item: any) => !chapterAlreadyHandled(String(item.status)));
     setSelectedChapters(next ? [Number(next.chapter_number)] : planned[0] ? [Number(planned[0].chapter_number)] : []);
   }, [project?.id]);
+  useEffect(() => {
+    setReworkChapter((current) => handledChapters.some((item: any) => Number(item.chapter_number) === current) ? current : Number(handledChapters[0]?.chapter_number || 0));
+  }, [project?.id, detail?.chapters]);
   useEffect(() => {
     if (!latestJob || !["running", "queued"].includes(latestJob.status)) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -449,6 +455,10 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
     return () => source.close();
   }, [latestJob?.id]);
   useEffect(() => {
+    const node = terminalRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [logs, latestJob?.error]);
+  useEffect(() => {
     if (!runId) { setFeedbackHistory([]); return; }
     void api<{feedback: WorkflowFeedback[]}>(`/api/workflows/${runId}/feedback`).then((value) => setFeedbackHistory(value.feedback));
   }, [runId]);
@@ -463,9 +473,16 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
   const cancel = () => latestJob && run("cancel", async () => { await post(`/api/jobs/${latestJob.id}/cancel`); await onRefresh(); });
   const retry = () => latestJob && run("retry", async () => { await post(`/api/jobs/${latestJob.id}/retry`); await onRefresh(); });
   const submitFeedback = () => run("feedback", async () => {
-    if (!runId) throw new Error("请先启动工作流");
-    const result = await post<{feedbackHistory: WorkflowFeedback[]}>(`/api/workflows/${runId}/feedback`, {feedback});
-    setFeedback(""); setFeedbackHistory(result.feedbackHistory); await onRefresh();
+    if (workflow?.status === "running") {
+      if (!runId) throw new Error("当前工作流不存在");
+      const result = await post<{feedbackHistory: WorkflowFeedback[]}>(`/api/workflows/${runId}/feedback`, {feedback});
+      setFeedback(""); setFeedbackHistory(result.feedbackHistory); await onRefresh();
+      return;
+    }
+    if (!project?.id || !reworkChapter) throw new Error("请选择需要返工的已通过章节");
+    await post("/api/workflows/rework", {bookId: project.id, chapter: reworkChapter, feedback, maxRevisions: 5, autoRun: true});
+    setFeedback("");
+    await onRefresh();
   });
 
   const elapsedSeconds = latestJob?.startedAt && ["running", "queued"].includes(latestJob.status) ? Math.max(0, Math.floor((now - new Date(latestJob.startedAt).getTime()) / 1000)) : latestJob?.startedAt && latestJob.finishedAt ? Math.max(0, Math.floor((new Date(latestJob.finishedAt).getTime() - new Date(latestJob.startedAt).getTime()) / 1000)) : 0;
@@ -531,11 +548,11 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
         <div className="panel-title"><div><span>Antigravity 任务</span><strong>{latestJob ? `${stageLabel(latestJob.stage)} · ${latestJob.id}` : "等待任务"}</strong></div>{latestJob && <StatusPill value={latestJob.status}/>}</div>
         {latestJob ? <>
           <div className="job-meta"><span><BookOpen/>第 {latestJob.chapter ?? "全书"} 章</span><span><Clock3/>{fmtDate(latestJob.startedAt || latestJob.createdAt)}</span><span><Fingerprint/>{latestJob.promptPath.split(/[\\/]/).pop()}</span></div>
-          <div className={`runtime-summary ${slow ? "slow" : ""}`}><div><Clock3/><span><b>{Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, "0")}</b><small>本阶段已耗时</small></span></div><div><Gauge/><span><b>{usualSeconds ? `通常约 ${usualSeconds} 秒` : "正在建立基准"}</b><small>{slow ? "明显慢于历史同阶段，仍有心跳且未假死" : "每个质量闸门使用独立 AGY 会话"}</small></span></div></div>
+          <div className={`runtime-summary ${slow ? "slow" : ""}`}><div><Clock3/><span><b>{Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, "0")}</b><small>本阶段已耗时</small></span></div><div><Gauge/><span><b>{usualSeconds ? `通常约 ${usualSeconds} 秒` : "正在建立基准"}</b><small>{slow ? "明显慢于历史同阶段；请根据下方 CLI 事件判断停留位置" : "每个质量闸门使用独立 AGY 会话"}</small></span></div></div>
           <div className="execution-steps"><span className="done"><Check/>装载隔离上下文</span><span className={latestJob.status === "running" ? "active" : "done"}><Bot/>分析与生成产物</span><span className={latestJob.status === "succeeded" ? "done" : "pending"}><Fingerprint/>JSON 结构检查</span><span className={latestJob.status === "succeeded" ? "done" : "pending"}><ShieldCheck/>Tomota 质量闸门</span></div>
           <div className="terminal" aria-live="polite">
-            <div className="terminal-head"><span/><span/><span/><b>公开执行轨迹 / {latestJob.stage}</b></div>
-            <div className="terminal-body">
+            <div className="terminal-head"><span/><span/><span/><b>Antigravity CLI 实时输出 / {latestJob.stage}</b></div>
+            <div className="terminal-body" ref={terminalRef}>
               {logs.length ? logs.map((event) => <p className={event.level} key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString("zh-CN")}</time>{event.message}</p>) : <p className="muted">等待任务输出…</p>}
               {latestJob.error && <p className="error"><time>停止</time>{latestJob.error}</p>}
             </div>
@@ -549,10 +566,11 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
       </section>
     </div>
     <section className="panel feedback-panel">
-      <div className="panel-title"><div><span>修改反馈</span><strong>{workflow?.status === "running" ? `反馈将绑定第 ${workflow.current_chapter ?? "—"} 章 · ${stageLabel(workflow.current_stage)}` : "反馈入口常驻；启动新流程后即可提交"}</strong></div><FilePenLine/></div>
+      <div className="panel-title"><div><span>修改反馈</span><strong>{workflow?.status === "running" ? `反馈将绑定第 ${workflow.current_chapter ?? "—"} 章 · ${stageLabel(workflow.current_stage)}` : handledChapters.length ? "已通过章节也可以按新要求重新走完整质量流程" : "完成严格审查后，可从这里发起定向返工"}</strong></div><FilePenLine/></div>
       <div className="feedback-compose">
-        <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} maxLength={4000} disabled={workflow?.status !== "running"} placeholder={workflow?.status === "running" ? "例如：姜也的语气再冷一点；删掉解释性对白；不要改动已经锁定的伏笔。" : "请先在页面上方选择章节并启动新流程，然后在这里提交修改要求。"} aria-label="当前阶段修改反馈"/>
-        <div><span>{workflow?.status === "running" ? "提交后会保留当前流程记录，并按反馈重新执行本阶段；Tomota 质量闸门仍然有效。" : "已完成或尚未启动时不会偷偷改稿。请先启动目标章节的新流程，反馈会绑定到当时的章节与阶段。"}</span><button className="primary" disabled={workflow?.status !== "running" || !feedback.trim() || busy === "feedback"} onClick={submitFeedback}>{busy === "feedback" ? <LoaderCircle className="spin"/> : <RotateCcw/>}{workflow?.status !== "running" ? "等待启动新流程" : latestJob && ["running", "queued"].includes(latestJob.status) ? "中止当前任务并按反馈重跑" : "按反馈重跑当前阶段"}</button></div>
+        {workflow?.status !== "running" && handledChapters.length > 0 && <label className="rework-chapter"><span>返工章节</span><select value={reworkChapter} onChange={(event) => setReworkChapter(Number(event.target.value))} aria-label="返工章节">{handledChapters.map((item: any) => <option key={item.chapter_number} value={Number(item.chapter_number)}>第 {item.chapter_number} 章 · {String(item.title)}</option>)}</select></label>}
+        <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} maxLength={4000} disabled={workflow?.status !== "running" && !handledChapters.length} placeholder={workflow?.status === "running" ? "例如：姜也的语气再冷一点；删掉解释性对白；不要改动已经锁定的伏笔。" : "写清要改什么、必须保留什么，以及你不希望再次出现的问题。"} aria-label="当前阶段修改反馈"/>
+        <div><span>{workflow?.status === "running" ? "提交后会保留当前流程记录，并按反馈重新执行本阶段；Tomota 质量闸门仍然有效。" : "原通过稿和审查证据会保留为历史版本；新稿从章节设计开始，重新通过全部审查后才会替换当前版本。"}</span><button className="primary" disabled={!feedback.trim() || busy === "feedback" || (workflow?.status !== "running" && !reworkChapter)} onClick={submitFeedback}>{busy === "feedback" ? <LoaderCircle className="spin"/> : <RotateCcw/>}{workflow?.status === "running" ? latestJob && ["running", "queued"].includes(latestJob.status) ? "中止当前任务并按反馈重跑" : "按反馈重跑当前阶段" : "按要求返工此章"}</button></div>
       </div>
       {feedbackHistory.length > 0 && <div className="feedback-history">{feedbackHistory.slice(0, 5).map((item) => <article key={item.id}><StatusPill value={item.status === "applied" ? "succeeded" : "queued"}/><span>第 {item.chapter ?? "—"} 章 · {stageLabel(item.stage)}</span><p>{item.content}</p></article>)}</div>}
     </section>
@@ -613,40 +631,77 @@ function WorkspaceView({ project, detail, onRefresh }: {project?: ProjectSummary
 function FanqieView({ project, detail, session, busy, run, setSession, onRefresh }: {project?: ProjectSummary; detail: ProjectDetail | null; session: FanqieSession | null; busy: string; run: (key: string, task: () => Promise<void>) => void; setSession: (value: FanqieSession) => void; onRefresh: () => Promise<void>}) {
   const [accounts, setAccounts] = useState<FanqieAccount[]>([]);
   const [works, setWorks] = useState<any[]>([]);
+  const [platformChapters, setPlatformChapters] = useState<any[]>([]);
   const [localInfo, setLocalInfo] = useState<any>(null);
   const [workFields, setWorkFields] = useState({platformWorkId: "", title: "", synopsis: "", tags: "", coverPath: ""});
   const [workWrite, setWorkWrite] = useState<any>(null);
-  const [workWriteToken, setWorkWriteToken] = useState("");
   const [selectedChapters, setSelectedChapters] = useState<number[]>([]);
   const [batch, setBatch] = useState<BatchPreview | null>(null);
-  const [tokens, setTokens] = useState<Record<string, string>>({});
+  const [publishFailure, setPublishFailure] = useState("");
+  const [publishResult, setPublishResult] = useState("");
+  const [writeWindow, setWriteWindow] = useState<FanqieWriteWindow | null>(null);
   const [accountLabel, setAccountLabel] = useState("");
   const [schedule, setSchedule] = useState({mode: "scheduled", chaptersPerDay: 2, publishHour: 20, startAt: ""});
-  const approved = (detail?.chapters || []).filter((item) => item.status === "approved" && item.review_path);
+  const approved = (detail?.chapters || []).filter((item) => ["approved", "scheduled", "submitted", "published"].includes(String(item.status)) && item.review_path);
+  const selectedPlatformWork = works.find((item) => item.platformId === workFields.platformWorkId);
   useEffect(() => { void api<{accounts: FanqieAccount[]}>('/api/fanqie/accounts').then((value) => setAccounts(value.accounts)); }, []);
-  useEffect(() => { void api<{works: any[]}>("/api/fanqie/works").then((value) => setWorks(value.works)); }, [session]);
-  useEffect(() => { if (works.length && !workFields.platformWorkId) setWorkFields((prior) => ({...prior, platformWorkId: works[0].platformId})); }, [works, workFields.platformWorkId]);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => void api<FanqieWriteWindow>("/api/fanqie/write-window").then((value) => { if (active) setWriteWindow(value); });
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+  useEffect(() => { void api<{works: any[]; chapters: any[]}>("/api/fanqie/works").then((value) => { setWorks(value.works); setPlatformChapters(value.chapters || []); }); }, [session]);
   useEffect(() => { setAccountLabel(session?.accountLabel || ""); }, [session?.accountId, session?.accountLabel]);
   useEffect(() => {
-    if (!project) return;
-    void api<any>(`/api/fanqie/local/${project.id}`).then((value) => {
+    const bookId = project?.id;
+    let cancelled = false;
+    setLocalInfo(null); setBatch(null); setPublishFailure(""); setPublishResult(""); setWorkWrite(null); setSelectedChapters([]);
+    setWorkFields({platformWorkId: "", title: "", synopsis: "", tags: "", coverPath: ""});
+    if (!bookId) return () => { cancelled = true; };
+    void api<any>(`/api/fanqie/local/${bookId}`).then((value) => {
+      if (cancelled) return;
       setLocalInfo(value);
       const metadata = value.book?.metadata || {};
+      const platformWorks = Array.isArray(value.platformWorks) ? value.platformWorks : [];
+      const bound = platformWorks.find((item: any) => item.platformId === value.boundPlatformWorkId);
+      const exact = platformWorks.find((item: any) => String(item.title || "").trim() === String(value.book?.title || "").trim());
       setWorkFields({
-        platformWorkId: value.platformWorks?.[0]?.platformId || "",
+        platformWorkId: bound?.platformId || exact?.platformId || "",
         title: String(value.book?.title || ""), synopsis: String(metadata.synopsis || ""), tags: String(metadata.genre || ""), coverPath: value.covers?.[0] || "",
       });
+      // Historical/pending batches never reopen themselves. A batch becomes
+      // actionable only from the user's current preview or one-click action.
     });
-  }, [project?.id]);
+    return () => { cancelled = true; };
+  }, [project?.id, session?.accountId, session?.checkedAt]);
+  useEffect(() => {
+    if (!localInfo || !works.length) return;
+    setWorkFields((current) => {
+      if (current.platformWorkId && works.some((item) => item.platformId === current.platformWorkId)) return current;
+      const bound = works.find((item) => item.platformId === localInfo.boundPlatformWorkId);
+      const exact = works.find((item) => String(item.title || "").trim() === String(localInfo.book?.title || project?.title || "").trim());
+      const match = bound || exact;
+      return match ? {...current, platformWorkId: match.platformId} : current;
+    });
+  }, [localInfo, works, project?.title]);
+  const approvedKey = approved.map((item) => `${item.chapter_number}:${item.content_hash || item.word_count}`).join("|");
+  useEffect(() => {
+    const existing = new Set(platformChapters.filter((item) => !workFields.platformWorkId || item.workId === workFields.platformWorkId).map((item) => Number(item.chapterNumber)));
+    const eligible = approved.map((item) => Number(item.chapter_number));
+    const replacements = existing.size ? eligible.filter((number) => existing.has(number)) : eligible;
+    setSelectedChapters(replacements);
+  }, [project?.id, approvedKey, platformChapters, workFields.platformWorkId]);
 
   const login = () => run("login", async () => setSession(await post("/api/fanqie/login/open")));
   const switchAccount = (accountId: string) => run("account-switch", async () => {
     const result = await post<{accounts: FanqieAccount[]; session: FanqieSession}>(`/api/fanqie/accounts/${accountId}/switch`);
-    setAccounts(result.accounts); setSession(result.session); setWorks(result.session.visibleWorks); setWorkWrite(null); setBatch(null);
+    setAccounts(result.accounts); setSession(result.session); setWorks(result.session.visibleWorks); setPlatformChapters([]); setWorkWrite(null); setBatch(null); setPublishFailure("");
   });
   const addAccount = () => run("account-add", async () => {
     const result = await post<{accounts: FanqieAccount[]; session: FanqieSession}>("/api/fanqie/accounts", {label: `番茄账号 ${accounts.length + 1}`});
-    setAccounts(result.accounts); setSession(result.session); setWorks([]);
+    setAccounts(result.accounts); setSession(result.session); setWorks([]); setPlatformChapters([]);
     setSession(await post("/api/fanqie/login/open"));
   });
   const renameAccount = () => session && run("account-rename", async () => {
@@ -662,33 +717,56 @@ function FanqieView({ project, detail, session, busy, run, setSession, onRefresh
     const confirmation = window.prompt(`只归档 Tomota 中的账号入口，不删除浏览器资料，也不影响番茄云端。\n请输入：${expected}`) || "";
     if (!confirmation) return;
     const result = await post<{accounts: FanqieAccount[]; session: FanqieSession}>(`/api/fanqie/accounts/${session.accountId}/archive`, {confirmation});
-    setAccounts(result.accounts); setSession(result.session); setWorks(result.session.visibleWorks); setBatch(null);
+    setAccounts(result.accounts); setSession(result.session); setWorks(result.session.visibleWorks); setBatch(null); setPublishFailure("");
   });
   const sync = () => run("sync", async () => {
     const result = await post<{session: FanqieSession; works: any[]}>("/api/fanqie/sync", { bookIds: project ? [project.id] : [] });
-    setSession(result.session); setWorks(result.works);
+    setSession(result.session); setWorks(result.works); setPlatformChapters((result as any).chapters || []); setBatch(null); setPublishFailure("");
   });
-  const prepare = () => run("prepare", async () => setBatch(await post("/api/fanqie/batches/preview", {bookId: project?.id, platformWorkId: workFields.platformWorkId, chapters: selectedChapters, schedule})));
+  const prepare = () => run("prepare", async () => {
+    setBatch(null); setPublishFailure(""); setPublishResult("");
+    setBatch(await post("/api/fanqie/batches/preview", {bookId: project?.id, platformWorkId: workFields.platformWorkId, chapters: selectedChapters, schedule}));
+  });
   const previewWorkWrite = () => run("work-preview", async () => setWorkWrite(await post("/api/fanqie/works/preview-write", {bookId: project?.id, platformWorkId: workFields.platformWorkId, fields: {title: workFields.title, synopsis: workFields.synopsis, tags: workFields.tags, coverPath: workFields.coverPath}})));
   const executeWorkWrite = () => workWrite && run("work-write", async () => {
-    await post(`/api/fanqie/batches/${workWrite.id}/confirm`, {operation: "write", token: workWriteToken});
-    const result = await post<any>(`/api/fanqie/works/${workWrite.id}/execute`, {confirmation: workWriteToken});
-    setWorkWrite(null); setWorkWriteToken("");
+    const confirmation = String(workWrite.confirmation || `WRITE ${workWrite.id}`);
+    await post(`/api/fanqie/batches/${workWrite.id}/confirm`, {operation: "write", token: confirmation});
+    const result = await post<any>(`/api/fanqie/works/${workWrite.id}/execute`, {confirmation});
+    setWorkWrite(null);
     if (result.status !== "submitted") throw new Error(result.message || "平台未返回明确成功状态");
   });
-  const confirmAndExecute = () => batch && run("execute", async () => {
-    const publish = tokens.publish || ""; const write = tokens.write || "";
-    await post(`/api/fanqie/batches/${batch.batch_id}/confirm`, { operation: "publish", token: publish });
-    await post(`/api/fanqie/batches/${batch.batch_id}/confirm`, { operation: "write", token: write });
-    const chapterConfirmations: Record<string, string> = {};
-    for (const chapter of batch.chapters) {
-      const token = tokens[`chapter-${chapter.chapter_number}`] || "";
-      await post(`/api/fanqie/batches/${batch.batch_id}/confirm`, { operation: "submit", token, chapter: chapter.chapter_number, hash: chapter.content_fingerprint });
-      chapterConfirmations[String(chapter.chapter_number)] = token;
+  const executeLockedBatch = async (lockedBatch: BatchPreview) => {
+    if (!writeWindow?.allowed) throw new Error(writeWindow?.message || "正在核对番茄可提交时间，请稍后再试");
+    // Clicking the final upload button is the user's action-time confirmation.
+    // Machine-bound tokens are derived from the currently visible batch so a
+    // previous preview can never leave stale confirmation text behind.
+    const publish = `PUBLISH ${lockedBatch.batch_id}`;
+    const write = `WRITE ${lockedBatch.batch_id}`;
+    try {
+      await post(`/api/fanqie/batches/${lockedBatch.batch_id}/confirm`, { operation: "publish", token: publish });
+      await post(`/api/fanqie/batches/${lockedBatch.batch_id}/confirm`, { operation: "write", token: write });
+      const chapterConfirmations: Record<string, string> = {};
+      for (const chapter of lockedBatch.chapters) {
+        const token = `SUBMIT ${lockedBatch.batch_id}:${chapter.chapter_number}:${chapter.content_fingerprint.slice(0, 12)}`;
+        await post(`/api/fanqie/batches/${lockedBatch.batch_id}/confirm`, { operation: "submit", token, chapter: chapter.chapter_number, hash: chapter.content_fingerprint });
+        chapterConfirmations[String(chapter.chapter_number)] = token;
+      }
+      const result = await post<Record<string, unknown>>(`/api/fanqie/batches/${lockedBatch.batch_id}/execute`, { confirmation: publish, actionConfirmation: write, chapterConfirmations });
+      await onRefresh(); setSession(await api("/api/fanqie/session"));
+      if (String(result.status) !== "submitted") throw new Error(String(result.message || "平台未返回明确成功状态；请先同步，勿重复上传"));
+      setPublishFailure(""); setBatch(null); setPublishResult(`批次 ${lockedBatch.batch_id} 已提交，正在等待番茄审核状态同步。`);
+    } catch (error) {
+      setPublishFailure(error instanceof Error ? error.message : String(error));
+      throw error;
     }
-    const result = await post<Record<string, unknown>>(`/api/fanqie/batches/${batch.batch_id}/execute`, { confirmation: publish, actionConfirmation: write, chapterConfirmations });
-    setBatch(null); setTokens({}); await onRefresh(); setSession(await api("/api/fanqie/session"));
-    if (!["submitted", "partial"].includes(String(result.status))) throw new Error(String(result.message || "平台未返回明确成功状态"));
+  };
+  const confirmAndExecute = () => batch && run("execute", async () => executeLockedBatch(batch));
+  const oneClickPublish = () => run("one-click-publish", async () => {
+    setBatch(null); setPublishFailure(""); setPublishResult("");
+    if (!project?.id || !workFields.platformWorkId || !selectedChapters.length) throw new Error("请先确认目标作品并选择章节");
+    const preview = await post<BatchPreview>("/api/fanqie/batches/preview", {bookId: project.id, platformWorkId: workFields.platformWorkId, chapters: selectedChapters, schedule});
+    setBatch(preview);
+    await executeLockedBatch(preview);
   });
 
   return <>
@@ -718,10 +796,10 @@ function FanqieView({ project, detail, session, busy, run, setSession, onRefresh
           <label><span>标签（逗号或斜线分隔）</span><input value={workFields.tags} onChange={(event) => setWorkFields({...workFields, tags: event.target.value})}/></label>
           <label><span>本地封面</span><select value={workFields.coverPath} onChange={(event) => setWorkFields({...workFields, coverPath: event.target.value})}><option value="">不修改封面</option>{(localInfo?.covers || []).map((cover: string) => <option value={cover} key={cover}>{cover.split(/[\\/]/).pop()}</option>)}</select></label>
         </div>
-        {!workWrite ? <button className="secondary metadata-preview" disabled={!workFields.platformWorkId || busy === "work-preview"} onClick={previewWorkWrite}><FilePenLine/>生成资料写入预览</button> : <div className="work-write-confirm"><div><span>将修改</span><strong>{workWrite.changedFields?.join("、")}</strong><code>{workWrite.payloadHash?.slice(0, 20)}…</code></div><label><span>请输入 {workWrite.confirmation}</span><input value={workWriteToken} onChange={(event) => setWorkWriteToken(event.target.value)} placeholder={workWrite.confirmation}/></label><button className="danger-write" disabled={busy === "work-write"} onClick={executeWorkWrite}><UploadCloud/>即时确认并写入</button><button className="secondary" onClick={() => { setWorkWrite(null); setWorkWriteToken(""); }}>取消</button></div>}
+        {!workWrite ? <button className="secondary metadata-preview" disabled={!workFields.platformWorkId || busy === "work-preview"} onClick={previewWorkWrite}><FilePenLine/>生成资料写入预览</button> : <div className="work-write-confirm"><div><span>将修改</span><strong>{workWrite.changedFields?.join("、")}</strong><code>{workWrite.payloadHash?.slice(0, 20)}…</code></div><p><ShieldCheck/>已锁定本次资料与封面哈希，点击即确认写入。</p><button className="danger-write" disabled={busy === "work-write"} onClick={executeWorkWrite}><UploadCloud/>确认写入</button><button className="secondary" onClick={() => setWorkWrite(null)}>取消</button></div>}
       </section> : <section className="panel fanqie-next"><BookOpen/><div><strong>先完成登录与同步</strong><p>读到平台作品后，这里才会显示资料、封面和章节发布操作。</p></div></section>}
       {works.length > 0 && approved.length > 0 && <section className="panel release-panel">
-        <div className="panel-title"><div><span>自动化发布</span><strong>{approved.length} 章通过严格闸门</strong></div><ShieldCheck/></div>
+        <div className="panel-title"><div><span>自动化发布与替换</span><strong>{approved.length} 章持有严格审查证据</strong></div><ShieldCheck/></div>
         <div className="publish-options">
           <label><span>发布方式</span><select value={schedule.mode} onChange={(event) => setSchedule({...schedule, mode: event.target.value})}><option value="scheduled">平台定时发布</option><option value="immediate">立即提交审核</option></select></label>
           {schedule.mode === "scheduled" && <>
@@ -729,28 +807,28 @@ function FanqieView({ project, detail, session, busy, run, setSession, onRefresh
             <label><span>首个发布时间（小时）</span><input type="number" min={0} max={23} value={schedule.publishHour} onChange={(event) => setSchedule({...schedule, publishHour: Number(event.target.value)})}/></label>
             <label><span>首发日期（可选）</span><input type="date" value={schedule.startAt} onChange={(event) => setSchedule({...schedule, startAt: event.target.value})}/></label>
           </>}
-          <p><ShieldCheck/>这里只生成并核对自动发布计划；实际填写和提交仍需本批次即时确认。平台发布后的定时执行由番茄完成。</p>
+          <p><ShieldCheck/>这里只生成并核对自动发布计划；实际填写和提交仍需本批次即时确认。番茄章节修改仅在北京时间 07:00—24:00 开放。</p>
         </div>
         <div className="chapter-select">{approved.map((chapter) => { const number = Number(chapter.chapter_number); return <label key={number}><input type="checkbox" checked={selectedChapters.includes(number)} onChange={(event) => setSelectedChapters((prior) => event.target.checked ? [...prior, number] : prior.filter((item) => item !== number))}/><span>第 {number} 章</span><strong>{String(chapter.title)}</strong><small>{Number(chapter.word_count).toLocaleString()} 字</small></label>; })}</div>
-        <button className="primary wide" disabled={!workFields.platformWorkId || !selectedChapters.length || busy === "prepare"} onClick={prepare}><Send/>生成发布批次预览</button>
+        {!workFields.platformWorkId && <div className="publish-binding-warning"><CircleAlert/><span>当前本地作品尚未关联平台作品。请先在上方明确选择，系统不会默认拿第一本书代替。</span></div>}
+        {selectedPlatformWork && selectedPlatformWork.title !== project?.title && <div className="publish-binding-warning danger"><CircleAlert/><span>本地《{project?.title}》将写入平台《{selectedPlatformWork.title}》。若不是有意改名，请勿继续。</span></div>}
+        {publishResult && <div className="publish-success"><Check/><span>{publishResult}</span></div>}
+        <div className="publish-actions"><button className="secondary" disabled={!selectedPlatformWork || !selectedChapters.length || busy === "prepare" || busy === "one-click-publish"} onClick={prepare}><Send/>仅生成核对预览</button><button className="danger-write one-click-publish" disabled={!selectedPlatformWork || !selectedChapters.length || busy === "one-click-publish" || writeWindow?.allowed !== true} onClick={oneClickPublish}>{busy === "one-click-publish" ? <LoaderCircle className="spin"/> : <UploadCloud/>}{writeWindow?.allowed === false ? "当前不在番茄可写时间" : `一键上传/替换并提交 ${selectedChapters.length} 章`}</button></div>
       </section>}
     </div>
     {batch && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="发布批次确认"><div className="batch-modal">
-      <div className="modal-head"><div><p className="eyebrow">ACTION-TIME CONFIRMATION</p><h2>核对并即时确认</h2></div><button className="icon-button" onClick={() => setBatch(null)}><X/></button></div>
-      <div className="batch-summary"><span>作品<strong>{batch.book_title}</strong><small>平台 ID {batch.platform_work_id}</small></span><span>批次<strong>{batch.batch_id}</strong></span><span>章节<strong>{batch.chapters.length}</strong></span></div>
-      <div className="batch-chapters">{batch.chapters.map((chapter) => <article key={chapter.chapter_number}><div><b>第 {chapter.chapter_number} 章</b><strong>{chapter.title}</strong>{chapter.scheduled_at && <small>{new Date(chapter.scheduled_at).toLocaleString("zh-CN", {hour12: false})}</small>}</div><span>{chapter.word_count.toLocaleString()} 字</span><code>{chapter.content_fingerprint.slice(0, 16)}…</code></article>)}</div>
-      <div className="confirm-fields">
-        <ConfirmField label="批准这个明确批次" expected={`PUBLISH ${batch.batch_id}`} value={tokens.publish || ""} onChange={(value) => setTokens({...tokens, publish: value})}/>
-        <ConfirmField label="批准当次浏览器写入" expected={`WRITE ${batch.batch_id}`} value={tokens.write || ""} onChange={(value) => setTokens({...tokens, write: value})}/>
-        {batch.chapters.map((chapter) => <ConfirmField key={chapter.chapter_number} label={`提交第 ${chapter.chapter_number} 章`} expected={`SUBMIT ${batch.batch_id}:${chapter.chapter_number}:${chapter.content_fingerprint.slice(0, 12)}`} value={tokens[`chapter-${chapter.chapter_number}`] || ""} onChange={(value) => setTokens({...tokens, [`chapter-${chapter.chapter_number}`]: value})}/>)}
+      <div className="modal-head"><div><p className="eyebrow">ACTION-TIME CONFIRMATION</p><h2>核对并即时确认</h2></div><button className="icon-button" onClick={() => { setBatch(null); setPublishFailure(""); }}><X/></button></div>
+      <div className="batch-summary"><span>作品<strong>{batch.book_title}</strong><small>写入平台《{batch.platform_work_title || selectedPlatformWork?.title || "未识别"}》 · ID {batch.platform_work_id}</small></span><span>批次<strong>{batch.batch_id}</strong></span><span>章节<strong>{batch.chapters.length}</strong></span></div>
+      <div className="batch-chapters">{batch.chapters.map((chapter) => <article key={chapter.chapter_number}><div><b>第 {chapter.chapter_number} 章</b><strong>{chapter.title}</strong>{chapter.operation === "update" ? <small>替换已发布版本{chapter.platform_word_count ? ` · ${chapter.platform_word_count.toLocaleString()} 字 → ${chapter.word_count.toLocaleString()} 字` : ""}</small> : chapter.scheduled_at && <small>{new Date(chapter.scheduled_at).toLocaleString("zh-CN", {hour12: false})}</small>}</div><span className={chapter.operation === "update" ? "operation-update" : ""}>{chapter.operation === "update" ? "替换" : `${chapter.word_count.toLocaleString()} 字`}</span><code>{chapter.content_fingerprint.slice(0, 16)}…</code></article>)}</div>
+      <div className="upload-confirmation">
+        <ShieldCheck/>
+        <div><strong>当前批次已自动锁定</strong><p>系统已绑定作品、章节、正文哈希与排期。点击下方按钮即确认只上传本弹窗列出的内容，无需手动填写口令。</p></div>
       </div>
-      <div className="modal-foot"><p><ShieldCheck/>网络或页面状态不明确时会停止，不会盲目重试。</p><button className="danger-write" onClick={confirmAndExecute} disabled={busy === "execute"}>{busy === "execute" ? <LoaderCircle className="spin"/> : <UploadCloud/>}确认并写入番茄</button></div>
+      {writeWindow && !writeWindow.allowed && <div className="publish-window-blocked"><Clock3/><div><strong>今晚只保留预览，不执行平台写入</strong><p>{writeWindow.message}</p><small>页面会自动检查时间窗，明早 07:00 后按钮自动恢复。</small></div></div>}
+      {publishFailure && <div className="publish-attempt-failure"><CircleAlert/><div><strong>本次上传已停止</strong><p>{publishFailure}</p><small>请关闭弹窗并点击“同步”，核对平台状态后再生成新批次。</small></div></div>}
+      <div className="modal-foot"><p><ShieldCheck/>网络、登录、时间窗或页面状态不明确时会立即停止，不会盲目重试。</p><button className="danger-write" onClick={confirmAndExecute} disabled={busy === "execute" || Boolean(publishFailure) || writeWindow?.allowed !== true}>{busy === "execute" ? <LoaderCircle className="spin"/> : <UploadCloud/>}{writeWindow?.allowed === false ? "明早 07:00 后可提交" : `确认${batch.chapters.some((chapter) => chapter.operation === "update") ? "替换/上传" : "上传"}这 ${batch.chapters.length} 章`}</button></div>
     </div></div>}
   </>;
-}
-
-function ConfirmField({label, expected, value, onChange}: {label: string; expected: string; value: string; onChange: (value: string) => void}) {
-  return <label><span>{label}</span><code>{expected}</code><input value={value} onChange={(event) => onChange(event.target.value)} placeholder="请完整输入上方确认文本" autoComplete="off"/></label>;
 }
 
 function SettingsView({ project, settings, onSettings, busy, run }: {project?: ProjectSummary; settings: Record<string, any> | null; onSettings: (value: Record<string, any>) => void; busy: string; run: (key: string, task: () => Promise<void>) => void}) {

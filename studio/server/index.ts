@@ -4,7 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { extname, join, relative, resolve } from "node:path";
 
 import { AntigravityRunner } from "./antigravity.js";
-import { FanqieBrowserService } from "./fanqie.js";
+import { FanqieBrowserService, fanqieWriteWindow } from "./fanqie.js";
 import { collectReviewFindings, listProjectFiles, readProjectFile, saveProjectFile } from "./projects.js";
 import { PythonBridge } from "./python.js";
 import { initializeWorkspace, StudioStore } from "./store.js";
@@ -202,6 +202,23 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
     json(response, 201, { ...started, agent: auto });
     return true;
   }
+  if (request.method === "POST" && url.pathname === "/api/workflows/rework") {
+    const value = await body(request);
+    const bookId = id(String(value.bookId || ""), "作品编号");
+    const chapter = Number(value.chapter);
+    const feedback = String(value.feedback || "").trim();
+    if (!Number.isInteger(chapter) || chapter <= 0) throw new Error("返工章节号无效");
+    if (!feedback || feedback.length > 4_000) throw new Error("返工要求必须为 1—4000 个字符");
+    const active = store.activeJobForBook(bookId);
+    if (active) throw new Error("同一本书已有 Antigravity 任务正在运行，请先停止后再返工");
+    const started = (await python.startRework(bookId, chapter, feedback, Math.min(5, Math.max(1, Number(value.maxRevisions || 5))))).value;
+    const workflow = started.run as Record<string, unknown>;
+    const runId = String(workflow.run_id || "");
+    store.addWorkflowFeedback(runId, bookId, "chapter_design", chapter, feedback);
+    const agent = value.autoRun !== false ? await runner.startContinuous(runId) : null;
+    json(response, 201, {...started, agent});
+    return true;
+  }
   match = url.pathname.match(/^\/api\/workflows\/([A-Za-z0-9_-]+)$/);
   if (request.method === "GET" && match) {
     const runId = id(match[1], "工作流编号");
@@ -331,6 +348,10 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
     json(response, 200, await fanqie.session());
     return true;
   }
+  if (request.method === "GET" && url.pathname === "/api/fanqie/write-window") {
+    json(response, 200, fanqieWriteWindow());
+    return true;
+  }
   if (request.method === "POST" && url.pathname === "/api/fanqie/login/open") {
     json(response, 200, await fanqie.openLogin());
     return true;
@@ -353,7 +374,14 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
     const covers = existsSync(assetsDir) ? (await readdir(assetsDir, {withFileTypes: true}))
       .filter((item) => item.isFile() && /\.(png|jpe?g|webp)$/i.test(item.name))
       .map((item) => join(assetsDir, item.name)) : [];
-    json(response, 200, {book: project.book || null, covers, platformWorks: store.listWorks()});
+    const accountId = store.activeFanqieAccount()?.id || "legacy";
+    json(response, 200, {
+      book: project.book || null,
+      covers,
+      platformWorks: store.listWorks(accountId),
+      boundPlatformWorkId: store.getMeta(`fanqie_book_work:${accountId}:${bookId}`) || "",
+      pendingBatch: await fanqie.pendingBatch(bookId),
+    });
     return true;
   }
   if (request.method === "POST" && url.pathname === "/api/fanqie/works/preview-write") {
@@ -378,6 +406,21 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
       publishHour: Number(schedule.publishHour ?? 20),
       startAt: schedule.startAt ? String(schedule.startAt) : null,
     }));
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/fanqie/publish/preflight") {
+    const value = await body(request);
+    json(response, 200, await fanqie.preflightPublish(String(value.platformWorkId || "")));
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/fanqie/publish/inspect") {
+    const value = await body(request);
+    json(response, 200, await fanqie.inspectChapterPage(String(value.platformWorkId || "")));
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/fanqie/publish/inspect-editor") {
+    const value = await body(request);
+    json(response, 200, await fanqie.inspectChapterEditor(String(value.platformWorkId || ""), String(value.platformChapterId || ""), value.advance === true));
     return true;
   }
   match = url.pathname.match(/^\/api\/fanqie\/batches\/([A-Za-z0-9_-]+)\/confirm$/);

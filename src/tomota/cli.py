@@ -162,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_start.add_argument("--chapters", required=True, help="逗号分隔章节号")
     workflow_start.add_argument("--max-revisions", type=int, default=5)
     workflow_start.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+    workflow_rework = workflow_sub.add_parser("rework", help="按作者反馈重开一个已通过章节，并保留旧版本与审查记录")
+    workflow_rework.add_argument("--book-id", required=True)
+    workflow_rework.add_argument("--chapter", type=int, required=True)
+    workflow_rework.add_argument("--max-revisions", type=int, default=5)
+    workflow_rework.add_argument("--file", required=True, help="包含 feedback 字段的 UTF-8 JSON")
+    workflow_rework.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
     workflow_status = workflow_sub.add_parser("status", help="查看流程状态")
     workflow_status.add_argument("--run-id", required=True)
     workflow_status.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
@@ -548,6 +554,14 @@ def _workflow_command(root: Path, args: argparse.Namespace) -> int:
     if args.workflow_command == "start":
         chapters = [int(item.strip()) for item in args.chapters.split(",") if item.strip()]
         run = engine.start(args.book_id, chapters, max_revisions=args.max_revisions)
+        print(json.dumps({"run": run.to_dict(), "next": engine.next_action(run.run_id)}, ensure_ascii=False, indent=2))
+        return 0
+    if args.workflow_command == "rework":
+        source = Path(args.file).resolve()
+        if not source.is_file():
+            raise RuntimeError(f"rework request does not exist: {source}")
+        value = json.loads(source.read_text(encoding="utf-8"))
+        run = engine.start_rework(args.book_id, args.chapter, str(value.get("feedback", "")), max_revisions=args.max_revisions)
         print(json.dumps({"run": run.to_dict(), "next": engine.next_action(run.run_id)}, ensure_ascii=False, indent=2))
         return 0
     if args.workflow_command == "status":

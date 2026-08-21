@@ -4,9 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FanqieBrowserService, parseVisibleWorks } from "../server/fanqie.js";
+import { FanqieBrowserService, fanqieWriteWindow, parseChapterRows, parseVisibleWorks } from "../server/fanqie.js";
 import type { PythonBridge } from "../server/python.js";
 import { StudioStore } from "../server/store.js";
+
+test("Fanqie chapter writes are disabled before 07:00 Beijing time", () => {
+  const before = fanqieWriteWindow(new Date("2026-08-20T16:30:00.000Z")); // 00:30 +08:00
+  assert.equal(before.allowed, false);
+  assert.equal(before.nextAllowedAt, "2026-08-20T23:00:00.000Z");
+  assert.match(before.message, /07:00/);
+  const open = fanqieWriteWindow(new Date("2026-08-20T23:00:00.000Z")); // 07:00 +08:00
+  assert.equal(open.allowed, true);
+  assert.equal(open.nextAllowedAt, null);
+});
 
 test("metadata and cover writes require a hashed preview and a current unchanged cover", async () => {
   const root = await mkdtemp(join(tmpdir(), "tomota-studio-work-write-"));
@@ -20,6 +30,8 @@ test("metadata and cover writes require a hashed preview and a current unchanged
     } as unknown as PythonBridge;
     const store = new StudioStore(root);
     const service = new FanqieBrowserService(root, store, python);
+    const account = service.accounts()[0];
+    store.upsertWorks(account.id, [{platformId: "7675620772693429273", title: "本地标题", url: "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273", status: "连载中", metrics: {}, syncedAt: new Date().toISOString()}]);
     const preview = await service.prepareWorkWrite("demo", "7675620772693429273", {coverPath});
     assert.match(String(preview.id), /^write-/);
     assert.equal(preview.confirmation, `WRITE ${preview.id}`);
@@ -47,6 +59,16 @@ test("generic signing tooltip links are never accepted as platform works", () =>
     {href: "https://fanqienovel.com/main/writer/book-info/7675620772693429273?isEdit=1", text: "点此了解", card: "完成签约后，作品可获得更多推荐"},
   ], "", "2026-08-20T00:00:00.000Z");
   assert.deepEqual(parsed.works, []);
+});
+
+test("chapter management rows resolve published chapter ids and titles", () => {
+  const chapters = parseChapterRows([
+    {text: "第4章 旧抄本 1534 0 已发布 2026-08-20 07:53", hrefs: ["https://fanqienovel.com/main/writer/preview/7675620772693429273&7675893913663586840", "https://fanqienovel.com/main/writer/7675620772693429273/publish/7675893913663586840/?enter_from=modifychapter"]},
+    {text: "章节名称 字数 错别字 审核状态 发布时间 操作", hrefs: []},
+  ], "7675620772693429273", "2026-08-20T00:00:00.000Z");
+  assert.deepEqual(chapters.map((item) => ({id: item.platformId, number: item.chapterNumber, title: item.title, status: item.status})), [
+    {id: "7675893913663586840", number: 4, title: "旧抄本", status: "已发布"},
+  ]);
 });
 
 test("Fanqie accounts keep browser profiles and synchronized works isolated", async () => {

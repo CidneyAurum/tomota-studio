@@ -105,6 +105,10 @@ export class PythonBridge {
     return this.run(["workflow", "start", "--book-id", bookId, "--chapters", chapters.join(","), "--max-revisions", String(maxRevisions), "--json"]);
   }
 
+  startRework(bookId: string, chapter: number, feedback: string, maxRevisions = 5): Promise<CommandResult<Record<string, unknown>>> {
+    return this.runPayload(["workflow", "rework", "--book-id", bookId, "--chapter", String(chapter), "--max-revisions", String(maxRevisions)], {feedback});
+  }
+
   workflowStatus(runId: string): Promise<CommandResult<Record<string, unknown>>> {
     return this.run(["workflow", "status", "--run-id", runId, "--json"]);
   }

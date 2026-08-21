@@ -573,7 +573,7 @@ class ProjectStore:
 
     def is_release_ready(self, book_id: str, chapter_number: int) -> bool:
         chapter = self.get_chapter(book_id, chapter_number)
-        if not chapter or chapter.get("status") != "approved" or not chapter.get("review_path"):
+        if not chapter or chapter.get("status") not in {"approved", "scheduled", "submitted", "published"} or not chapter.get("review_path"):
             return False
         review_path = Path(chapter["review_path"])
         if not review_path.is_file():
