@@ -154,6 +154,15 @@ button.wide { width: 100%; } button.small { height: 33px; }
 .terminal-body { height: 245px; overflow: auto; padding: 12px 14px; font: 10px/1.7 "DM Mono", "Noto Sans SC", monospace; }
 .terminal-body p { margin: 0 0 5px; color: #9fa7b1; white-space: pre-wrap; word-break: break-word; }
 .terminal-body p time { color: #4f5965; margin-right: 10px; }.terminal-body p.stderr, .terminal-body p.error { color: #e08b85; }.terminal-body p.info { color: #7acbb0; }.terminal-body p.muted { color: #4f5965; }
+.agent-stream-layout { margin: 15px; display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; }
+.agent-stream-layout .terminal, .generated-stream { margin: 0; }
+.usage-strip { margin: 12px 15px 0; min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); font-size: 10px; }
+.usage-strip svg { width: 15px; color: var(--cyan); }.usage-strip b { color: #b8a473; }.usage-strip small { margin-left: auto; color: var(--dim); }
+.generated-stream { border: 1px solid #242b34; border-radius: 7px; background: #090c10; overflow: hidden; }
+.generated-head { border-bottom: 1px solid #1f252c; }
+.generated-body { height: 245px; overflow: auto; padding: 14px; }
+.generated-body pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: #d7e3f0; font: 12px/1.75 "Noto Sans SC", sans-serif; }
+.generated-body p { margin: 0; color: #4f5965; font-size: 11px; }
 .job-actions { min-height: 54px; padding: 0 15px 15px; display: flex; align-items: center; justify-content: space-between; gap: 15px; color: var(--muted); font-size: 10px; }
 .runtime-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 15px 0; }.runtime-summary > div { min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--line-soft); background: #0d1116; border-radius: 6px; }.runtime-summary svg { width: 16px; color: var(--cyan); }.runtime-summary span, .runtime-summary b, .runtime-summary small { display: block; }.runtime-summary b { font: 600 11px "DM Mono", monospace; }.runtime-summary small { color: var(--dim); font-size: 9px; margin-top: 3px; }.runtime-summary.slow > div:last-child { border-color: #6b4e28; background: #1d180f; }.runtime-summary.slow > div:last-child svg { color: var(--warning); }
 .execution-steps { padding: 10px 15px 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }.execution-steps span { min-height: 30px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--line-soft); border-radius: 5px; color: var(--dim); font-size: 8px; }.execution-steps svg { width: 12px; }.execution-steps .done { color: var(--success); border-color: #244537; }.execution-steps .active { color: #ead08e; border-color: #6a572e; background: #1d190f; }.execution-steps .pending { color: var(--dim); }
@@ -309,6 +318,13 @@ body {
 .terminal { margin: 20px; border-radius: 14px; background: rgba(3, 6, 10, .78); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
 .terminal-head { height: 46px; padding-inline: 16px; }.terminal-head span { width: 9px; height: 9px; }.terminal-head b { font-size: 12px; }
 .terminal-body { height: 360px; padding: 18px 20px; font-size: 13.5px; line-height: 1.8; }
+.agent-stream-layout { margin: 20px; gap: 16px; grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr); }
+.usage-strip { margin: 16px 20px 0; min-height: 58px; border-radius: 12px; padding: 12px 15px; font-size: 13px; }
+.usage-strip svg { width: 18px; }.usage-strip small { font-size: 12px; }
+.generated-stream { border-radius: 14px; background: rgba(3, 6, 10, .78); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+.generated-body { height: 360px; padding: 20px 22px; }
+.generated-body pre { font-size: 16px; line-height: 1.85; }
+.generated-body p { font-size: 13px; }
 .terminal-body p { margin-bottom: 8px; }.terminal-body p time { margin-right: 14px; }
 .decision-trace { margin: 0 20px 18px; max-height: 250px; border-radius: 12px; background: rgba(7, 11, 17, .46); }
 .decision-trace > div { padding: 12px 14px; background: rgba(20, 27, 36, .92); }.decision-trace > div strong { font-size: 14px; }.decision-trace > div span { font-size: 12px; }

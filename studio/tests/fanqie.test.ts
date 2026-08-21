@@ -18,6 +18,50 @@ test("Fanqie chapter writes are disabled before 07:00 Beijing time", () => {
   assert.equal(open.nextAllowedAt, null);
 });
 
+test("publish previews lock the AI declaration to no and fail closed on stale batches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tomota-studio-batch-preview-"));
+  let store: StudioStore | null = null;
+  try {
+    const publishDir = join(root, "books", "demo", "publish");
+    await mkdir(publishDir, {recursive: true});
+    const batchId = "batch-test-123";
+    await writeFile(join(publishDir, `${batchId}.preview.json`), JSON.stringify({
+      batch_id: batchId, book_id: "demo", book_title: "本地标题", status: "preview",
+      chapters: [{chapter_number: 1, title: "第一章", word_count: 1000, content_fingerprint: "a".repeat(64)}],
+      next_confirmation: `PUBLISH ${batchId}`,
+    }), "utf8");
+    const python = {
+      async run(args: string[]) {
+        if (args[0] === "release") return {value: {batch_id: batchId}};
+        throw new Error(`unexpected python call: ${args.join(" ")}`);
+      },
+    } as unknown as PythonBridge;
+    store = new StudioStore(root);
+    const service = new FanqieBrowserService(root, store, python);
+    (service as unknown as {preflightPublish: () => Promise<Record<string, unknown>>}).preflightPublish = async () => ({ok: true});
+    const account = service.accounts()[0];
+    store.upsertWorks(account.id, [{platformId: "7675620772693429273", title: "本地标题", url: "https://fanqienovel.com/main/writer/chapter-manage/7675620772693429273", status: "连载中", metrics: {}, syncedAt: new Date().toISOString()}]);
+    const preview = await service.prepareBatch("demo", [1], "7675620772693429273", {mode: "immediate"}, new Date("2026-08-20T23:00:00.000Z"));
+    assert.equal(preview.safety?.account_id, account.id);
+    assert.equal(preview.safety?.ai_usage_required, true);
+    assert.equal(preview.safety?.ai_usage_value, "no");
+    assert.deepEqual(preview.safety?.create_and_update_paths, ["create:1"]);
+    await assert.rejects(
+      () => service.prepareBatch("demo", [1], "7675620772693429273", {mode: "immediate"}, new Date("2026-08-20T23:00:00.000Z")),
+      (error: Error & {code?: string}) => error.code === "pending_batch_exists",
+    );
+    store.deleteMeta(`fanqie_book_pending_batch:${account.id}:demo`);
+    await assert.rejects(
+      () => service.prepareBatch("demo", [1], "7675620772693429273", {mode: "immediate"}, new Date("2026-08-20T16:30:00.000Z")),
+      (error: Error & {code?: string}) => error.code === "time_window_blocked",
+    );
+  } finally {
+    store?.db.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
 test("metadata and cover writes require a hashed preview and a current unchanged cover", async () => {
   const root = await mkdtemp(join(tmpdir(), "tomota-studio-work-write-"));
   try {

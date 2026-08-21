@@ -16,6 +16,19 @@ async function waitFor(predicate: () => boolean, timeout = 5000): Promise<void> 
   }
 }
 
+async function removeTempDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await rm(path, {recursive: true, force: true});
+      return;
+    } catch (error) {
+      if ((error as {code?: string})?.code !== "EBUSY") throw error;
+      if (attempt === 11) return; // Windows may briefly hold SQLite WAL files after close.
+      await new Promise((resolve) => setTimeout(resolve, 125));
+    }
+  }
+}
+
 async function fixture(mode: "valid" | "invalid") {
   const root = await mkdtemp(join(tmpdir(), "tomota-studio-agy-"));
   const chapterDir = join(root, "books", "demo", "workflow", "run-1", "chapter-0001");
@@ -34,15 +47,20 @@ async function fixture(mode: "valid" | "invalid") {
     const output = instruction.match(/UTF-8 JSON 到：(.+)/)[1].trim();
     console.log(JSON.stringify({event:"init",conversation_id:"fixture-conversation",init:{cwd:process.cwd()}}));
     console.log(JSON.stringify({event:"step_update",step_update:{step_index:1,state:"DONE",step_type:"file_write",path:output,duration_seconds:0.2}}));
-    console.log(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"DONE",step_type:"agent_response",text_delta:"指定 JSON 已写入"}}));
+        console.log(JSON.stringify({event:"step_update",step_update:{step_index:2,state:"ACTIVE",step_type:"agent_response",text_delta:"指定 JSON 已写入\\n"}}));
     await writeFile(output, ${mode === "valid" ? "JSON.stringify({stage:'draft',content:'正文'})" : "'not-json'"}, "utf8");
-    console.log(JSON.stringify({event:"result",status:"SUCCESS",duration_seconds:0.3,num_turns:1,usage:{total_tokens:42}}));
+    console.log(JSON.stringify({event:"result",status:"SUCCESS",response:"指定 JSON 已写入\\n",duration_seconds:0.3,num_turns:1,usage:{input_tokens:10,output_tokens:20,thinking_tokens:5,total_tokens:42}}));
   `, "utf8");
   let submits = 0;
+  let submitsInFirstTest = 0;
   const python = {
     async workflowStatus() { return { value: { run_id: "run-1", book_id: "demo", status: "running", current_stage: "draft" } }; },
     async nextAction() { return { value: { run_id: "run-1", book_id: "demo", chapter: 1, stage: "draft", status: "running", prompt_path: promptPath, output_schema: {stage: "draft", content: ""} } }; },
-    async submit() { submits += 1; return { value: { status: "completed" } }; },
+    async submit() {
+      submits += 1;
+      submitsInFirstTest += 1;
+      return { value: { status: submitsInFirstTest === 1 ? "completed" : "stopped" } };
+    },
   } as unknown as PythonBridge;
   const store = new StudioStore(root);
   await mkdir(join(store.dataDir, "jobs"), { recursive: true });
@@ -56,18 +74,33 @@ test("valid Antigravity JSON advances only through the Tomota submit bridge", as
     const started = await value.runner.startContinuous("run-1");
     assert.equal(started.job?.status, "running");
     await waitFor(() => value.store.getJob(started.job!.id)?.status === "succeeded");
+    await new Promise((resolve) => setTimeout(resolve, 400));
     assert.equal(value.submits(), 1);
     assert.ok(value.store.getJob(started.job!.id)?.outputHash);
     assert.equal(value.runner.status().execution, "ready");
     assert.equal(value.runner.status().auth, "authenticated");
-    const messages = value.store.listEvents(started.job!.id, 0).map((event) => event.message).join("\n");
+    const events = value.store.listEvents(started.job!.id, 0);
+    const messages = events.map((event) => event.message).join("\n");
     assert.match(messages, /CLI 会话已建立/);
     assert.match(messages, /写入产物/);
     assert.match(messages, /指定 JSON 已写入/);
     assert.match(messages, /CLI 完成 · SUCCESS/);
     assert.doesNotMatch(messages, /运行 \d+ 秒 ·/);
+    const assistant = events.filter((event) => event.kind === "assistant_text" && event.payload?.textDelta);
+    assert.equal(assistant.map((event) => String(event.payload?.textDelta || "")).join(""), "指定 JSON 已写入\n");
+    const toolEvent = events.find((event) => event.kind === "tool_event" && event.payload?.path);
+    assert.ok(toolEvent);
+    assert.equal(toolEvent?.payload?.stepType, "file_write");
+    const result = [...events].reverse().find((event) => event.kind === "result");
+    assert.equal(result?.payload?.status, "SUCCESS");
+    assert.deepEqual(result?.payload?.usage, {inputTokens: 10, outputTokens: 20, thinkingTokens: 5, totalTokens: 42});
+    const usage = [...events].reverse().find((event) => event.kind === "usage");
+    assert.equal(usage?.payload?.thinkingTokens, 5);
+    assert.ok(!events.some((event) => event.message.includes("思考原文")));
+    value.runner.removeAllListeners();
     value.store.db.close();
-  } finally { await rm(value.root, { recursive: true, force: true }); }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  } finally { await removeTempDir(value.root); }
 });
 
 test("planning assistant returns a validated preview without mutating workflow state", async () => {
@@ -106,7 +139,7 @@ test("planning assistant returns a validated preview without mutating workflow s
   } finally {
     store?.db.close();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await rm(root, {recursive: true, force: true});
+    await removeTempDir(root);
   }
 });
 
@@ -118,7 +151,7 @@ test("malformed Antigravity output fails closed and never calls workflow submit"
     assert.equal(value.submits(), 0);
     assert.match(value.store.getJob(started.job!.id)?.error || "", /产物无效/);
     value.store.db.close();
-  } finally { await rm(value.root, { recursive: true, force: true }); }
+  } finally { await removeTempDir(value.root); }
 });
 
 test("pending user feedback is injected once and bound to the launched retry job", async () => {
@@ -131,7 +164,7 @@ test("pending user feedback is injected once and bound to the launched retry job
     assert.equal(stored?.status, "applied");
     assert.equal(stored?.jobId, started.job?.id);
     value.store.db.close();
-  } finally { await rm(value.root, { recursive: true, force: true }); }
+  } finally { await removeTempDir(value.root); }
 });
 
 test("feedback cancels an active generation and restarts the same stage with the comment attached", async () => {
@@ -168,7 +201,7 @@ test("feedback cancels an active generation and restarts the same stage with the
     assert.equal(store.listWorkflowFeedback("run-feedback").find((item) => item.id === feedback.id)?.jobId, restarted.job?.id);
     assert.equal(submits, 1);
     store.db.close();
-  } finally { await rm(root, {recursive: true, force: true}); }
+  } finally { await removeTempDir(root); }
 });
 
 test("malformed JSON is automatically corrected with the prior error attached", async () => {
@@ -200,7 +233,7 @@ test("malformed JSON is automatically corrected with the prior error attached", 
     assert.deepEqual(jobs.map((job) => job.status), ["failed", "succeeded"]);
     assert.equal(submits, 1);
     store.db.close();
-  } finally { await rm(root, {recursive: true, force: true}); }
+  } finally { await removeTempDir(root); }
 });
 
 test("a restarted store marks active jobs interrupted instead of claiming success", async () => {
@@ -212,7 +245,7 @@ test("a restarted store marks active jobs interrupted instead of claiming succes
     const second = new StudioStore(root);
     assert.equal(second.getJob(job.id)?.status, "interrupted");
     second.db.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTempDir(root); }
 });
 
 test("retry validates an existing interrupted output before launching Antigravity again", async () => {
@@ -234,7 +267,7 @@ test("retry validates an existing interrupted output before launching Antigravit
     assert.equal(submits, 1);
     assert.match(result.job?.error || "", /没有重复调用/);
     store.db.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTempDir(root); }
 });
 
 test("continuous runner serially invokes every strict Skill stage through completion", async () => {
@@ -275,5 +308,5 @@ test("continuous runner serially invokes every strict Skill stage through comple
     await waitFor(() => index === stages.length && store.listJobs("run-full", 20).every((job) => job.status === "succeeded"), 15_000);
     assert.deepEqual(store.listJobs("run-full", 20).map((job) => job.stage).reverse(), stages);
     store.db.close();
-  } finally { await rm(root, {recursive: true, force: true}); }
+  } finally { await removeTempDir(root); }
 });

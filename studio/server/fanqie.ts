@@ -389,12 +389,12 @@ export class FanqieBrowserService {
     }
   }
 
-  async prepareBatch(bookId: string, chapters: number[], platformWorkId: string, options: PublishPlanOptions = {mode: "scheduled"}): Promise<PublishBatchPreview> {
+  async prepareBatch(bookId: string, chapters: number[], platformWorkId: string, options: PublishPlanOptions = {mode: "scheduled"}, now = new Date()): Promise<PublishBatchPreview> {
     if (!/^\d{10,}$/.test(platformWorkId)) throw new Error("请选择当前账号同步到的番茄作品");
     const account = this.activeAccount();
     const platformWork = this.store.listWorks(account.id).find((work) => work.platformId === platformWorkId);
     if (!platformWork) throw new Error("目标作品不属于当前账号的已同步作品，请先重新同步");
-    const writeWindow = fanqieWriteWindow();
+    const writeWindow = fanqieWriteWindow(now);
     if (!writeWindow.allowed) throw Object.assign(new Error(writeWindow.message), {code: "time_window_blocked", writeWindow});
     if (this.store.getMeta(`fanqie_book_pending_batch:${account.id}:${bookId}`)) {
       throw Object.assign(new Error("当前作品已有待确认发布批次；请先完成、同步或重新生成该批次，避免旧批次混入新内容"), {code: "pending_batch_exists"});

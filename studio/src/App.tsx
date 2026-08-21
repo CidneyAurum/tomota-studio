@@ -450,8 +450,8 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
     setLogs([]);
     if (!latestJob?.id) return;
     const source = new EventSource(`/api/jobs/${latestJob.id}/events`);
-    const handler = (event: MessageEvent) => setLogs((prior) => [...prior.slice(-199), JSON.parse(event.data)]);
-    for (const name of ["info", "stdout", "stderr", "error"]) source.addEventListener(name, handler as EventListener);
+    const handler = (event: MessageEvent) => setLogs((prior) => [...prior.slice(-399), JSON.parse(event.data)]);
+    source.addEventListener("message", handler as EventListener);
     return () => source.close();
   }, [latestJob?.id]);
   useEffect(() => {
@@ -464,6 +464,14 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
   }, [runId]);
 
   const currentIndex = stages.findIndex(([key]) => key === workflow?.current_stage);
+  const assistantText = logs
+    .filter((event) => event.kind === "assistant_text" && event.payload?.textDelta)
+    .map((event) => String(event.payload?.textDelta || ""))
+    .join("");
+  const finalResult = [...logs].reverse().find((event: JobEvent) => event.kind === "result");
+  const generatedContent = assistantText || String(finalResult?.payload?.response || "");
+  const processEvents = logs.filter((event) => event.kind !== "assistant_text");
+  const latestUsage = [...logs].reverse().find((event: JobEvent) => event.kind === "usage")?.payload;
   const start = () => run("start", async () => {
     if (!selectedChapters.length) throw new Error("请先在卷章选择器中选择本次处理章节");
     await post("/api/workflows", { bookId: project?.id, chapters: selectedChapters, maxRevisions: 5, autoRun: true });
@@ -550,11 +558,20 @@ function WorkflowView({ project, detail, runId, busy, run, onRefresh, onPlan }: 
           <div className="job-meta"><span><BookOpen/>第 {latestJob.chapter ?? "全书"} 章</span><span><Clock3/>{fmtDate(latestJob.startedAt || latestJob.createdAt)}</span><span><Fingerprint/>{latestJob.promptPath.split(/[\\/]/).pop()}</span></div>
           <div className={`runtime-summary ${slow ? "slow" : ""}`}><div><Clock3/><span><b>{Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, "0")}</b><small>本阶段已耗时</small></span></div><div><Gauge/><span><b>{usualSeconds ? `通常约 ${usualSeconds} 秒` : "正在建立基准"}</b><small>{slow ? "明显慢于历史同阶段；请根据下方 CLI 事件判断停留位置" : "每个质量闸门使用独立 AGY 会话"}</small></span></div></div>
           <div className="execution-steps"><span className="done"><Check/>装载隔离上下文</span><span className={latestJob.status === "running" ? "active" : "done"}><Bot/>分析与生成产物</span><span className={latestJob.status === "succeeded" ? "done" : "pending"}><Fingerprint/>JSON 结构检查</span><span className={latestJob.status === "succeeded" ? "done" : "pending"}><ShieldCheck/>Tomota 质量闸门</span></div>
-          <div className="terminal" aria-live="polite">
-            <div className="terminal-head"><span/><span/><span/><b>Antigravity CLI 实时输出 / {latestJob.stage}</b></div>
-            <div className="terminal-body" ref={terminalRef}>
-              {logs.length ? logs.map((event) => <p className={event.level} key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString("zh-CN")}</time>{event.message}</p>) : <p className="muted">等待任务输出…</p>}
-              {latestJob.error && <p className="error"><time>停止</time>{latestJob.error}</p>}
+          {latestUsage && <div className="usage-strip"><Gauge/><span>输入 {Number(latestUsage.inputTokens || 0).toLocaleString()}</span><span>输出 {Number(latestUsage.outputTokens || 0).toLocaleString()}</span><span>思考 {Number(latestUsage.thinkingTokens || 0).toLocaleString()}</span><b>{Number(latestUsage.totalTokens || 0).toLocaleString()} tokens</b><small>思考 token 仅计数，不展示隐藏原文</small></div>}
+          <div className="agent-stream-layout">
+            <div className="terminal" aria-live="polite">
+              <div className="terminal-head"><span/><span/><span/><b>过程流 / {latestJob.stage}</b></div>
+              <div className="terminal-body" ref={terminalRef}>
+                {processEvents.length ? processEvents.map((event) => <p className={event.level} key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString("zh-CN")}</time>{event.message}</p>) : <p className="muted">等待任务输出…</p>}
+                {latestJob.error && <p className="error"><time>停止</time>{latestJob.error}</p>}
+              </div>
+            </div>
+            <div className="generated-stream">
+              <div className="terminal-head generated-head"><span/><span/><span/><b>生成内容</b></div>
+              <div className="generated-body">
+                {generatedContent ? <pre>{generatedContent}</pre> : <p className="muted">等待 Antigravity 输出公开文本…</p>}
+              </div>
             </div>
           </div>
           {stageHistory.length > 0 && <div className="decision-trace"><div><strong>最近流程决策</strong><span>展示阶段结论与返工原因，不展示模型隐藏思维原文</span></div>{stageHistory.map((item: any, index: number) => <article key={`${item.at}-${index}`}><time>{fmtDate(item.at)}</time><b>{stageLabel(String(item.stage))}</b><p>{String(item.result || "阶段已处理")}</p></article>)}</div>}

@@ -457,6 +457,11 @@ export class AntigravityRunner extends EventEmitter {
     this.emit("job-event", event);
   }
 
+  private structuredEvent(jobId: string, kind: JobEvent["kind"], message: string, payload: Record<string, unknown>): void {
+    const event = this.store.appendEvent(jobId, "stdout", message, kind, payload);
+    this.emit("job-event", event);
+  }
+
   private handleCliChunk(jobId: string, channel: "stdout" | "stderr", chunk: string): void {
     const buffers = this.streamBuffers.get(jobId) || {stdout: "", stderr: ""};
     buffers[channel] += chunk;
@@ -488,7 +493,9 @@ export class AntigravityRunner extends EventEmitter {
         const init = payload.init || {};
         const conversation = String(payload.conversation_id || init.conversation_id || "").slice(0, 12);
         const cwd = String(init.cwd || "");
-        this.event(jobId, "stdout", `CLI 会话已建立${conversation ? ` · ${conversation}` : ""}${cwd ? ` · ${cwd}` : ""}`);
+        this.structuredEvent(jobId, "status", `CLI 会话已建立${conversation ? ` · ${conversation}` : ""}${cwd ? ` · ${cwd}` : ""}`, {
+          status: "session_started", conversationId: conversation, cwd,
+        });
         return;
       }
       if (eventName === "step_update") {
@@ -498,23 +505,34 @@ export class AntigravityRunner extends EventEmitter {
           user_input: "接收任务", checkpoint: "建立检查点", agent_response: "正在思考",
           tool_call: "调用工具", tool_result: "工具返回", file_read: "读取文件", file_write: "写入产物",
         };
-        const textDelta = String(step.text_delta || step.content || step.message || "").trim();
+        const textDelta = String(step.text_delta || step.content || step.message || "");
         const toolName = String(step.tool_name || step.name || step.tool?.name || "");
         const path = String(step.path || step.file_path || step.tool?.path || "");
         const duration = Number(step.duration_seconds);
         // Emit a compact metadata line for every step so the user sees progress.
         const metaParts = [labels[type] || type, toolName, path, Number.isFinite(duration) ? `${duration.toFixed(1)}秒` : "", step.state && step.state !== "DONE" ? String(step.state) : ""].filter(Boolean);
-        if (metaParts.length) this.event(jobId, "stdout", metaParts.join(" · ").slice(0, 2_000));
-        // For agent_response steps, emit the actual generated text as a
-        // separate content event so the user sees the AI thinking process,
-        // not just a mechanical label.  Allow up to 12k chars per delta.
-        if (textDelta && (type === "agent_response" || type === "user_input")) {
-          this.event(jobId, "stdout", textDelta.slice(0, 12_000));
-        } else if (textDelta && type === "tool_call") {
-          this.event(jobId, "stdout", `  → ${textDelta.slice(0, 6_000)}`);
-        } else if (textDelta && type === "tool_result") {
-          this.event(jobId, "stdout", `  ← ${textDelta.slice(0, 6_000)}`);
+        const stepPayload: Record<string, unknown> = {
+          stepIndex: Number.isFinite(Number(step.step_index)) ? Number(step.step_index) : undefined,
+          stepType: type,
+          state: step.state ? String(step.state) : undefined,
+          durationSeconds: Number.isFinite(duration) ? duration : undefined,
+        };
+        if (toolName) stepPayload.toolName = toolName;
+        if (path) stepPayload.path = path;
+        if (textDelta) stepPayload.textDelta = textDelta.slice(0, 12_000);
+        if (metaParts.length) {
+          this.structuredEvent(jobId, type === "agent_response" ? "status" : "tool_event", metaParts.join(" · ").slice(0, 2_000), stepPayload);
+        } else if (textDelta) {
+          this.structuredEvent(jobId, type === "agent_response" ? "assistant_text" : "tool_event", textDelta.slice(0, 2_000), stepPayload);
         }
+        if (textDelta && type === "agent_response") {
+          this.structuredEvent(jobId, "assistant_text", textDelta.slice(0, 12_000), stepPayload);
+        } else if (textDelta && type === "tool_call") {
+          this.structuredEvent(jobId, "tool_event", `  → ${textDelta.slice(0, 6_000)}`, stepPayload);
+        } else if (textDelta && type === "tool_result") {
+          this.structuredEvent(jobId, "tool_event", `  ← ${textDelta.slice(0, 6_000)}`, stepPayload);
+        }
+        if (Number.isFinite(Number(step.thinking_tokens)) || (step.usage && typeof step.usage === "object")) this.emitUsage(jobId, step);
         return;
       }
       if (eventName === "result") {
@@ -529,7 +547,16 @@ export class AntigravityRunner extends EventEmitter {
           Number.isFinite(turns) ? `${turns} 轮` : "",
           Number.isFinite(totalTokens) ? `${totalTokens.toLocaleString()} tokens` : "",
         ].filter(Boolean).join(" · ");
-        this.event(jobId, "stdout", detail);
+        const resultPayload: Record<string, unknown> = {
+          status: String(result.status || payload.status || "unknown"),
+          durationSeconds: Number.isFinite(duration) ? duration : undefined,
+          turns: Number.isFinite(turns) ? turns : undefined,
+          response: String(result.response || payload.response || ""),
+        };
+        const usagePayload = this.usagePayload(usage);
+        if (usagePayload) resultPayload.usage = usagePayload;
+        this.structuredEvent(jobId, "result", detail, resultPayload);
+        if (usagePayload) this.structuredEvent(jobId, "usage", `用量 · 输入 ${usagePayload.inputTokens ?? 0} · 输出 ${usagePayload.outputTokens ?? 0} · 思考 ${usagePayload.thinkingTokens ?? 0} · 总计 ${usagePayload.totalTokens ?? 0}`, usagePayload);
         return;
       }
       const message = String(payload.message || payload.text_delta || payload.status || "").trim();
@@ -537,6 +564,22 @@ export class AntigravityRunner extends EventEmitter {
     } catch {
       this.event(jobId, "stdout", line.slice(0, 8_000));
     }
+  }
+
+  private emitUsage(jobId: string, step: Record<string, any>): void {
+    const usage = this.usagePayload(step.usage || {thinking_tokens: step.thinking_tokens});
+    if (!usage) return;
+    this.structuredEvent(jobId, "usage", `用量 · 思考 ${usage.thinkingTokens ?? 0} tokens`, usage);
+  }
+
+  private usagePayload(usage: Record<string, any>): Record<string, number> | null {
+    const value = {
+      inputTokens: Number(usage.input_tokens),
+      outputTokens: Number(usage.output_tokens),
+      thinkingTokens: Number(usage.thinking_tokens),
+      totalTokens: Number(usage.total_tokens),
+    };
+    return Object.values(value).some(Number.isFinite) ? value : null;
   }
 
   private scheduleCorrectionRetry(jobId: string): void {

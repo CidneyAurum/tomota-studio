@@ -277,7 +277,7 @@ async function api(request: IncomingMessage, response: ServerResponse, url: URL)
     const after = Number(url.searchParams.get("after") || 0);
     setSecurityHeaders(response);
     response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" });
-    const send = (event: {id: number; jobId: string; level: string; message: string; createdAt: string}) => response.write(`id: ${event.id}\nevent: ${event.level}\ndata: ${JSON.stringify(event)}\n\n`);
+    const send = (event: {id: number; jobId: string; level: string; message: string; createdAt: string}) => response.write(`id: ${event.id}\nevent: message\ndata: ${JSON.stringify(event)}\n\n`);
     for (const event of store.listEvents(jobId, after)) send(event);
     const listener = (event: {id: number; jobId: string; level: string; message: string; createdAt: string}) => { if (event.jobId === jobId) send(event); };
     runner.on("job-event", listener);

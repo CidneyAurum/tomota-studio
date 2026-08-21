@@ -83,6 +83,8 @@ export class StudioStore {
         job_id TEXT NOT NULL,
         level TEXT NOT NULL,
         message TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'log',
+        payload TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS workflow_feedback (
@@ -180,6 +182,8 @@ export class StudioStore {
     this.ensureColumn("fanqie_accounts", "last_sync_status", "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn("fanqie_accounts", "last_sync_at", "TEXT");
     this.ensureColumn("fanqie_accounts", "archived_at", "TEXT");
+    this.ensureColumn("job_events", "kind", "TEXT NOT NULL DEFAULT 'log'");
+    this.ensureColumn("job_events", "payload", "TEXT");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_fanqie_accounts_active ON fanqie_accounts(is_active, updated_at);
       CREATE INDEX IF NOT EXISTS idx_platform_works_account_sync ON platform_works(account_id, synced_at);
@@ -253,16 +257,27 @@ export class StudioStore {
     return job;
   }
 
-  appendEvent(jobId: string, level: JobEvent["level"], message: string): JobEvent {
+  appendEvent(jobId: string, level: JobEvent["level"], message: string, kind: JobEvent["kind"] = "log", payload: Record<string, unknown> | null = null): JobEvent {
     const clean = message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").slice(0, 12000);
     const createdAt = isoNow();
-    const result = this.db.prepare("INSERT INTO job_events(job_id,level,message,created_at) VALUES(?,?,?,?)").run(jobId, level, clean, createdAt);
-   return { id: Number(result.lastInsertRowid), jobId, level, kind: "log" as const, payload: null, message: clean, createdAt };
+    const cleanPayload = payload ? JSON.stringify(payload).slice(0, 100_000) : null;
+    const result = this.db.prepare("INSERT INTO job_events(job_id,level,message,kind,payload,created_at) VALUES(?,?,?,?,?,?)")
+      .run(jobId, level, clean, kind, cleanPayload, createdAt);
+    return { id: Number(result.lastInsertRowid), jobId, level, kind, payload, message: clean, createdAt };
   }
 
   listEvents(jobId: string, after = 0): JobEvent[] {
     const rows = this.db.prepare("SELECT * FROM job_events WHERE job_id=? AND id>? ORDER BY id LIMIT 500").all(jobId, after) as Array<Record<string, unknown>>;
-   return rows.map((row) => ({ id: Number(row.id), jobId: String(row.job_id), level: String(row.level) as JobEvent["level"], kind: "log" as const, payload: null, message: String(row.message), createdAt: String(row.created_at) }));
+    return rows.map((row) => {
+      let payload: Record<string, unknown> | null = null;
+      if (row.payload) {
+        try { payload = JSON.parse(String(row.payload)) as Record<string, unknown>; } catch { payload = null; }
+      }
+      return {
+        id: Number(row.id), jobId: String(row.job_id), level: String(row.level) as JobEvent["level"],
+        kind: String(row.kind || "log") as JobEvent["kind"], payload, message: String(row.message), createdAt: String(row.created_at),
+      };
+    });
   }
 
   addWorkflowFeedback(runId: string, bookId: string, stage: string, chapter: number | null, content: string): WorkflowFeedback {
