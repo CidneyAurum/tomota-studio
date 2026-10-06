@@ -388,6 +388,8 @@ test("dimension verification enforces batch identity, completeness and order", (
   assert.throws(() => validate(base({dimension_ids: ["d-1"]})), /按原顺序且仅返回锁定维度/);
   assert.throws(() => validate(base({dimension_ids: ["d-0", "d-0"]})), /按原顺序且仅返回锁定维度/);
   assert.throws(() => validate(base({checks: {...checks, evidence_grounded: false}})), /质量检查必须通过/);
+  assert.throws(() => validate(base({checks: {}})), /检查 ID 必须完整/);
+  assert.throws(() => validate(base({checks: {...checks, invented: true}})), /检查 ID 必须完整/);
   assert.throws(() => validate(base({dimensions: []})), /维度数量与锁定批次不一致/);
   assert.throws(() => validate(base({dimensions: [dimension("d-renamed")]})), /不得新增、删除、重排或改名维度/);
 });
@@ -862,14 +864,16 @@ test("method rule with required_unless_user_or_canon_conflict can be deferred", 
     planning_audit:Object.fromEntries(["causality","knowledge_boundaries","choice_cost_consequence","relationship_change","foreshadowing","continuity"].map((field) => [field,{passed:true,findings:["核验通过"],evidence_paths:["objective","change"]}])),
     constraint_delta:{base_contract_hash:"",changes:[]},
     reader_world_contract:{reader_promise:"读者获得证词矛盾被逐项核验的推理快感，每次揭示都改变人物关系而非堆设定。",emotional_payoff:"先让主角因误判受挫，再用可核验证据补偿，形成挫败与满足的交替。",world_mechanics:"钟声传播受位置、时间与身体状态限制，任何结论必须通过可观察条件验证。",world_exceptions:"只有记录维护者能补写证词，但必须留下时间戳并承担暴露风险。",author_world_integration:"作者方法把世界规则转为信息差与代价结构，让人物行动后果显影，并用选择代价替代设定说明段。",character_integration:"主角求真的欲望受身份暴露风险限制，身份压力让核证选择同时改变信任、信息边界和下一步危险。",conflicts_and_tradeoffs:"已核验与用户要求及Canon无冲突；保留既有钟声事实。",evidence_paths:["objective","new_information","change"]},
-    author_application:{adopted:[],deferred:[{rule_id:"blueprint-1",reason:"与用户明确要求冲突，公开暂缓"}]},
+    author_application:{adopted:[],deferred:[{rule_id:"blueprint-1",reason:"与用户明确要求冲突，公开暂缓",conflict_source:"user_instruction",conflict_quote:"本章暂不使用该方法"}]},
     originality_audit:{source_specific_echoes:[],generic_serial_scaffold_risks:[],corrective_actions:["去换皮"]},
     rationale:["依据"],warnings:[],
   };
   const runner = new AntigravityRunner(".", null as never, {} as PythonBridge, {executable:"noop"});
   const validate = (runner as unknown as {validatePlanningArtifactForTest: (stage: string, value: Record<string, unknown>, authorRules?: Array<Record<string, unknown>>) => void}).validatePlanningArtifactForTest;
-  // blueprint 规则 transfer_mode=method 但 application_requirement=required_unless_user_or_canon_conflict，可 deferred，不应抛出"不得暂缓"。
-  validate("planning_chapter", artifact, [blueprintRule]);
+  const groundedValidate = validate as (stage: string, value: Record<string, unknown>, rules: Array<Record<string, unknown>>, authority?: Record<string, unknown>) => void;
+  assert.throws(() => groundedValidate("planning_chapter", artifact, [blueprintRule]), /冻结用户要求/);
+  groundedValidate("planning_chapter", artifact, [blueprintRule], {user_instruction:"本章暂不使用该方法"});
+  assert.throws(() => groundedValidate("planning_chapter", artifact, [blueprintRule], {user_instruction:"请使用全部方法"}), /冻结用户要求/);
 });
 
 test("fresh foundation rejects an empty or partial contract delta", () => {

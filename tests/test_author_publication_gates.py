@@ -72,3 +72,17 @@ class AuthorPublicationGateTests(unittest.TestCase):
                    "distillation_quality": {"corpus_coverage": 100}}
         with self.assertRaisesRegex(ValueError, "text_hash"):
             self.service._validate_distilled_profile(self.author_id, profile, manifest)
+
+    def test_dimension_reference_compiles_once(self):
+        self.service.store.create_book("audit-book", "测试作品", {})
+        profile = author_profile()
+        profile["style_dimensions"] = [{
+            "id": "method-1", "label": "动作", "finding": "以动作写情绪", "writing_instruction": "用停笔呈现犹豫",
+            "avoid": "直接解释情绪", "scope": "author_core", "confidence": 80, "stability": 80,
+            "axis": "scene_causality", "applies_to": ["chapter_design", "drafting"], "evidence_ids": ["E1"],
+        }]
+        profile["book_architecture"] = {"scene": [{"dimension_id": "method-1"}]}
+        version = self.service.create_version(self.author_id, profile, status="published")
+        self.service.bind_book("audit-book", version["id"])
+        policy = self.service.compile_policy("audit-book")
+        self.assertEqual(sum(rule["rule"] == "用停笔呈现犹豫" for rule in policy["active_rules"]), 1)

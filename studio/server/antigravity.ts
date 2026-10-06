@@ -1097,10 +1097,18 @@ function validateStyleWorkReduce(value: Record<string, unknown>, lineage: Record
   }
 }
 
+function validateDistillationChecks(checks: unknown, expected: string[]): void {
+  if (!checks || Array.isArray(checks) || typeof checks !== "object"
+      || Object.keys(checks).length !== expected.length
+      || expected.some((key) => (checks as Record<string, unknown>)[key] !== true)) {
+    throw new Error("蒸馏复核的全部质量检查必须通过，且检查 ID 必须完整、精确，禁止空对象或改名");
+  }
+}
+
 function validateStyleVerify(value: Record<string, unknown>, sourceIds: string[], evidenceRecords: EvidenceRecord[] = []): Record<string, unknown> {
   if (value.stage !== AUTHOR_STYLE_VERIFY_STAGE || !["pass", "corrected"].includes(String(value.verdict))) throw new Error("蒸馏复核 verdict 无效");
   const checks = value.checks;
-  if (!checks || Array.isArray(checks) || typeof checks !== "object" || Object.values(checks as Record<string, unknown>).some((item) => item !== true)) throw new Error("蒸馏复核的全部质量检查必须通过");
+  validateDistillationChecks(checks, Object.keys(styleVerifySchema().checks as Record<string, unknown>));
   const candidate = value.candidate;
   if (!candidate || Array.isArray(candidate) || typeof candidate !== "object") throw new Error("蒸馏复核缺少完整候选");
   validateAuthorCandidate("author_style_distill", candidate as Record<string, unknown>, evidenceRecords);
@@ -1133,9 +1141,7 @@ function validateStyleDimensionVerify(
     throw new Error("分维度复核必须按原顺序且仅返回锁定维度");
   }
   const checks = value.checks;
-  if (!checks || Array.isArray(checks) || typeof checks !== "object" || Object.values(checks as Record<string, unknown>).some((item) => item !== true)) {
-    throw new Error("分维度复核的全部质量检查必须通过");
-  }
+  validateDistillationChecks(checks, Object.keys(styleDimensionVerifySchema().checks as Record<string, unknown>));
   const rawDimensions = Array.isArray(value.dimensions) ? value.dimensions : [];
   if (rawDimensions.length !== expectedIds.length) throw new Error("分维度复核返回的维度数量与锁定批次不一致");
   const restored = restoreDimensionTransferExamples(rawDimensions, aggregate);
@@ -1377,7 +1383,7 @@ function planningSchema(stage: string): Record<string, unknown> {
         proposal_paths: ["proposal.premise", "proposal.major_beats", "proposal.volumes[0].main_conflict"],
         surface_copy_avoided: "明确排除来源作品人物、专名、意象组合、机制、情节骨架或句式，并说明本书替代设计（至少 30 字）",
       }],
-      deferred: [{rule_id: "optional_content_tendency 或 application_requirement=required_unless_conflict 的方法的真实规则编号", reason: "与用户要求、Canon 或题材不相合的公开原因；普通 method_rules 禁止放入此处"}],
+      deferred: [{rule_id: "optional_content_tendency 或 application_requirement=required_unless_conflict 的方法的真实规则编号", reason: "与用户要求、Canon 或题材不相合的公开原因；普通 method_rules 禁止放入此处", conflict_source: "条件必需方法填写 user_instruction 或 canon；可选方法可为空", conflict_quote: "条件必需方法必须逐字引用冻结用户要求或 Canon 中的冲突依据；可选方法可为空"}],
     },
     originality_audit: {
       source_specific_echoes: ["发现的来源作品专名、标志物或成套母题；没有则为空数组"],
@@ -1834,7 +1840,7 @@ function planningAuthorRuleTransfer(entry: Record<string, unknown>, rule: Record
   }
 }
 
-function validatePlanningArtifact(stage: string, value: Record<string, unknown>, authorRules: Array<Record<string, unknown>> = []): void {
+function validatePlanningArtifact(stage: string, value: Record<string, unknown>, authorRules: Array<Record<string, unknown>> = [], deferralAuthority: Record<string, unknown> = {}): void {
   if (!PLANNING_STAGES.has(stage)) throw new Error("未知规划层级");
   const proposal = value.proposal;
   if (!proposal || Array.isArray(proposal) || typeof proposal !== "object") throw new Error("规划产物缺少 proposal 对象");
@@ -1970,8 +1976,24 @@ function validatePlanningArtifact(stage: string, value: Record<string, unknown>,
       const mode = String(rule.transfer_mode || "method");
       const requirement = String(rule.application_requirement || "").trim().toLowerCase();
       return mode === "method_unless_conflict" || mode === "optional_content_tendency"
+        || ["contextual", "optional", "should", "optional_content_tendency"].includes(requirement)
         || requirement === "required_unless_user_or_canon_conflict" || requirement === "required_unless_conflict";
     };
+    for (const entry of deferred) {
+      const rule = expected.get(String(entry.rule_id || ""))!;
+      const requirement = String(rule.application_requirement || "").toLowerCase();
+      const conditional = ["required_unless_user_or_canon_conflict", "required_unless_conflict"].includes(requirement)
+        || String(rule.transfer_mode || "") === "method_unless_conflict";
+      if (!conditional) continue;
+      const source = String(entry.conflict_source || "");
+      const quote = String(entry.conflict_quote || "").trim();
+      const authority = source === "user_instruction" ? deferralAuthority.user_instruction
+        : source === "canon" ? deferralAuthority.canon : undefined;
+      const text = typeof authority === "string" ? authority : authority ? JSON.stringify(authority) : "";
+      if (!quote || !text || !text.includes(quote)) {
+        throw new Error(`条件必需方法 ${entry.rule_id} 暂缓必须用 conflict_source/conflict_quote 引用冻结用户要求或 Canon；不能只声明冲突`);
+      }
+    }
     const methodIds = new Set(authorRules.filter((rule) => !isDeferrable(rule)).map((rule) => String(rule.rule_id || "")));
     const deferredMethodIds = deferred.map((entry) => String(entry.rule_id || "")).filter((id) => methodIds.has(id));
     if (deferredMethodIds.length) {
@@ -2380,6 +2402,7 @@ export class AntigravityRunner extends EventEmitter {
     const planningContextSnapshot = planningSnapshotFromContext(value.scope, value.mode, value.context);
     const planningStateHashes = planningSnapshotHashes(planningContextSnapshot);
     const planningContextHashes = {
+      deferral_authority_hash: canonicalJsonHash({user_instruction: value.instruction || "", canon}),
       author_contract_hash: canonicalJsonHash(authorContract),
       author_profile_hash: String(authorContract.profile_hash || ""),
       foundation_contract_hash: planningFoundationContractHash(foundationContract),
@@ -2438,6 +2461,7 @@ export class AntigravityRunner extends EventEmitter {
       "- optional_content_tendencies 的采用说明至少 40 字、至少引用 2 个字段；若与用户创意或 Canon 不合，公开暂缓，禁止强塞母题。",
       "- optional_content_tendencies 不是硬性剧情模板。只有与用户创意、Canon 和题材自然相合时才能采用，否则必须在 author_application.deferred 公开暂缓，禁止为证明作者符合度强塞原罪、残损、契约或固定终局。",
       "- author_application 必须逐条覆盖当前 author_contract 的全部规则：method_rules 必须转译并采用；optional_content_tendencies 以及 application_requirement=required_unless_conflict 的方法可以因与用户明确要求或 Canon 冲突而公开暂缓（写进 deferred 并说明冲突）。浅层转述、单一字段贴标签、空泛形容词堆砌都会被硬校验拒绝并触发自动重试。",
+      "- 条件必需方法的 deferred 必须提供 conflict_source=user_instruction|canon 和逐字 conflict_quote；依据只能来自本次冻结输入，不能引用候选方案自己制造的冲突。可选方法仍可按适用条件说明未采用原因。",
       "- originality_audit 必须检查来源作品换皮和通用连载模板风险；禁止用‘某作品式’‘精准还原’‘复刻作者’等表面声明冒充文风落实。",
       "- proposal 必须提供 planning_audit 六项硬验收：causality、knowledge_boundaries、choice_cost_consequence、relationship_change、foreshadowing、continuity。每项必须 passed=true、给出 findings，并用 evidence_paths 引用 proposal 的真实字段；任何一项未通过都会被系统拒绝。",
       "- target_platform、发布平台字段只约束安全、格式、纯文字可读性与发布资格；不得据此推导题材、结构、人物、节奏或章末公式。",
@@ -2494,6 +2518,7 @@ export class AntigravityRunner extends EventEmitter {
       planning_scope: value.scope,
       planning_mode: value.mode,
       planning_author_rules: planningAuthorRules,
+      planning_deferral_authority: {user_instruction: value.instruction || "", canon},
       planning_deep_contract: deepPlanningContract,
       planning_fresh_foundation: value.context.fresh_foundation === true,
       planning_foundation_incomplete_categories: Array.isArray(value.context.foundation_incomplete_categories) ? value.context.foundation_incomplete_categories.map(String) : [],
@@ -2523,7 +2548,7 @@ export class AntigravityRunner extends EventEmitter {
         const parsed = JSON.parse(raw) as Record<string, unknown>;
         const selectedResult = this.store.getJobResult(selectedJob.id);
         const rules = selectedResult.lineage.planningAuthorRules;
-        validatePlanningArtifact(selectedJob.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : []);
+        validatePlanningArtifact(selectedJob.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : [], selectedResult.lineage.planningDeferralAuthority as Record<string, unknown> || {});
         validatePlanningSelection(selectedJob.stage, parsed, selectedResult.lineage.planningContextSnapshot);
         if (selectedResult.lineage.planningFreshFoundation === true) {
           validateFreshFoundationDelta(parsed);
@@ -2540,7 +2565,7 @@ export class AntigravityRunner extends EventEmitter {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       const directResult = this.store.getJobResult(job.id);
       const rules = directResult.lineage.planningAuthorRules;
-      validatePlanningArtifact(job.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : []);
+      validatePlanningArtifact(job.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : [], directResult.lineage.planningDeferralAuthority as Record<string, unknown> || {});
       validatePlanningSelection(job.stage, parsed, directResult.lineage.planningContextSnapshot);
       if (directResult.lineage.planningFreshFoundation === true) {
         validateFreshFoundationDelta(parsed);
@@ -3661,6 +3686,7 @@ export class AntigravityRunner extends EventEmitter {
         planningScope: action.planning_scope || "",
         planningMode: action.planning_mode || "fill",
         planningAuthorRules: action.planning_author_rules || [],
+        planningDeferralAuthority: action.planning_deferral_authority || {},
         planningFreshFoundation: action.planning_fresh_foundation === true,
         planningFoundationIncompleteCategories: Array.isArray(action.planning_foundation_incomplete_categories) ? action.planning_foundation_incomplete_categories.map(String) : [],
         planningSourcePromptPath: originalPromptPath,
@@ -3944,7 +3970,7 @@ export class AntigravityRunner extends EventEmitter {
       if (PLANNING_STAGES.has(job.stage)) {
         const planningLineage = this.store.getJobResult(jobId).lineage;
         const rules = planningLineage.planningAuthorRules;
-        validatePlanningArtifact(job.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : []);
+        validatePlanningArtifact(job.stage, parsed, Array.isArray(rules) ? rules as Array<Record<string, unknown>> : [], planningLineage.planningDeferralAuthority as Record<string, unknown> || {});
         validatePlanningSelection(job.stage, parsed, planningLineage.planningContextSnapshot);
         if (planningLineage.planningFreshFoundation === true) {
           validateFreshFoundationDelta(parsed);

@@ -3,7 +3,7 @@
 Scope: this project's author distillation, application during writing, constraints,
 self-checks and review gates. No external comparison project is in scope.
 
-## Implemented, awaiting complete integration verification
+## Implemented and verified
 
 - Author creation validates distilled provenance even with an empty source manifest.
 - Direct published creation and draft publication share a quality gate.
@@ -21,29 +21,44 @@ self-checks and review gates. No external comparison project is in scope.
 - Passing quality scorecards require every dimension to score at least 3/5.
 - Source manifests reject duplicate source IDs; publication rechecks actual source
   text hashes against the frozen manifest, rejecting missing or changed sources.
+- Conditional planning deferrals must quote frozen user instructions or Canon;
+  optional methods can still be omitted with a reason. Generation and result-read
+  paths share this gate and inherit the frozen authority through job lineage.
+- Final and dimensional distillation reviews require the exact complete check IDs;
+  an empty or renamed check object cannot masquerade as a passing review.
 
-Verification: Python full suite 160/160, Studio 148/148 and production build passed.
-Subsequent authored-workflow public-boundary test passes (missing self-check and
-invented independent-review evidence are blocked). Publication-gate tests now 7/7,
-including source mutation and duplicate-source regressions.
+Final verification: Python full suite 164/164, Studio 148/148 and production build
+passed. The authored public-submit test covers draft, independent review, review
+failure, revision, stale-quote rejection and invalidation of old voice approval.
+Publication-gate tests are 8/8, including source mutation, duplicate sources and
+exact dimension-reference deduplication.
 
 Core implementation and previously untracked required runtime sources were pushed
 to `origin/codex/logic-gate-audit` at `46f9555`; the remote hash was verified.
 Local database backups, cleanup staging, desktop packaging and historical audit
 helpers were not included in this core snapshot.
 
-Regression additions: `test_author_publication_gates.py` and
-`test_rule_execution_gates.py`. Existing source-sanitization fixture now correctly
+Regression additions: `test_author_publication_gates.py`, `test_author_realization.py`,
+`test_authored_workflow.py` and `test_rule_execution_gates.py`, plus Studio review
+and planning assertions. Existing source-sanitization fixture now correctly
 identifies its ungrounded hand-written profile as manual, not distilled.
 
-## Remaining work (not completion claims)
+## Completion evidence
 
-- Expand authored-run coverage for failed-review repair and revision receipts.
-- Verify Studio planning deferral semantics agree with Python stage contracts.
-- Review immutable source hashes, publication provenance and pipeline coverage
-  consistency; current full-read pipeline is stronger than generic profile import.
-- Extend positive/negative tests for suppression and exact reference deduplication.
-- Re-run affected suites after subsequent changes and verify final remote state.
+| Requirement | Evidence |
+| --- | --- |
+| Distillation provenance and publication | Source and publication regressions; Studio full locked-character pipeline test |
+| Applying distilled methods | Reference deduplication, contextual obligation and suppression propagation tests |
+| Constraint precedence | Same-rank cycles rejected; legitimate book override suppression accepted |
+| Self-check and independent review | Public authored workflow plus missing/duplicate/fabricated receipt regressions |
+| Revision consistency | Changed quote rejected until receipt updated; review restarts at logic and old voice review removed |
+| Planning exceptions | Missing or false frozen-authority quotes rejected; grounded conditional deferral accepted |
+| Review completeness and scoring | Empty/extra distillation checks rejected; scores below 3 cannot pass |
+| Regression and build | 164 Python tests, 148 Studio tests, TypeScript checks and Vite production build |
+
+No live model generation or real platform publication was used for validation.
+This is a source-level and automated-regression audit of the scoped logic chain,
+not a claim that arbitrary prose is artistically good or semantically correct.
 
 ## Verification boundaries
 

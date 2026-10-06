@@ -67,3 +67,20 @@ class AuthoredWorkflowTests(unittest.TestCase):
         voice["author_realization"] = receipts
         engine.submit(run_id, voice)
         self.assertEqual(self.current().current_stage, "review_continuity")
+        failure = self.gate("review_continuity")
+        failure.update(passed=False, findings=[{
+            "finding_id": "repair-1", "severity": "blocker", "category": "转场",
+            "location": "第1段", "quote": "抄写笔停在纸上。", "diagnosis": "需要更明确的停顿动作",
+            "violated_rule": "动作承接情绪", "repair_requirement": "改写停笔动作", "status": "open",
+        }], revision_brief=self.fixture.revision_brief("抄写笔停在纸上。", "review_continuity"))
+        engine.submit(run_id, failure)
+        self.assertEqual(self.current().current_stage, "revise_continuity")
+        revised = content.replace("抄写笔停在纸上。", "抄写笔悬在纸面。")
+        revision = {"stage": "revise_continuity", "content": revised,
+                    "author_realization": receipts}
+        with self.assertRaises(WorkflowError):
+            engine.submit(run_id, revision)
+        revision["author_realization"] = [{**receipt, "quote": "抄写笔悬在纸面。"} for receipt in receipts]
+        engine.submit(run_id, revision)
+        self.assertEqual(self.current().current_stage, "review_logic")
+        self.assertFalse((engine._stage_dir(self.current()) / "review_voice.json").exists())

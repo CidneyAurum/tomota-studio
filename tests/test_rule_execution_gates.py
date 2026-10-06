@@ -69,3 +69,10 @@ class RuleExecutionGateTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "严格高于"):
             self.engine._validate_design_constraint_application(
                 self.run, {"scenes": [{"scene_id": "S1"}], "constraint_application": mappings})
+        self.engine._compile_stage_writing_policy = lambda *a: {"executable_style_rules": [
+            {"rule_id": "A", "class": "must", "source": "distilled_dimension"},
+            {"rule_id": "B", "class": "must", "source": "book_override"}]}
+        mappings[1].update(source="book_override", conflict_status="active", suppressed_by="",
+                           conflict_reason="", conflict_dimensions=[])
+        self.engine._validate_design_constraint_application(
+            self.run, {"scenes": [{"scene_id": "S1"}], "constraint_application": mappings})
