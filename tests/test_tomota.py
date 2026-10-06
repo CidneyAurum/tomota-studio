@@ -1585,19 +1585,32 @@ class StrictStateMachineTests(unittest.TestCase):
         self.assertIn('"repair_source": "final_validation"', prompt)
         self.assertIn("正文长度低于目标字数", prompt)
         self.assertIn(content.splitlines()[0], prompt)
+        self.assertIn("repair_receipts", action["output_schema"]["required"])
+        final_targets = engine._polish_ledger(engine._run(run.run_id))["targets"]
+        self.assertTrue(any("正文长度低于目标字数" in target["requirement"] for target in final_targets))
+        self.assertTrue(all(target["gate"] == "review_logic" for target in final_targets))
 
     def test_sixth_failed_review_blocks_after_five_revisions_and_keeps_two_drafts(self):
         engine = WorkflowEngine(self.root, skill_root=SKILL_ROOT)
         run = engine.start("demo", [1], max_revisions=5)
         content = self.advance_to_logic_review(engine, run.run_id)
-        finding = {"finding_id": "motivation", "severity": "blocker", "category": "行动动机", "location": "第2段", "quote": "他决定去查", "diagnosis": "线索不足", "violated_rule": "行动必须有触发", "repair_requirement": "补出物证来源", "status": "open"}
+        finding = {"finding_id": "motivation", "severity": "blocker", "category": "行动动机", "location": "第2段", "quote": "决定去查寄信人", "diagnosis": "线索不足", "violated_rule": "行动必须有触发", "repair_requirement": "补出物证来源", "status": "open"}
         for index in range(6):
             failed = self.passed_gate("review_logic")
             failed.update({"passed": False, "findings": [finding], "revision_brief": self.revision_brief()})
+            if index:
+                failed["repair_verification"] = []
             status = engine.submit(run.run_id, failed)
             if index < 5:
                 self.assertEqual(status["current_stage"], "revise_logic")
-                engine.submit(run.run_id, {"stage": "revise_logic", "content": content + f"\n\n返工线索 {index + 1}。"})
+                updated = content + f"\n\n返工线索 {index + 1}。"
+                repair_receipts = [{
+                    "target_id": target["target_id"], "mode": "repaired", "before_quote": content,
+                    "after_quote": updated, "explanation": "补充线索供重新审查；本测试审查仍判定不足",
+                    "preservation": {"before_quote": "档册只记着十二次。", "after_quote": "档册只记着十二次。",
+                                     "explanation": "保留钟声记录矛盾"},
+                } for target in engine._polish_ledger(engine._run(run.run_id))["targets"]]
+                engine.submit(run.run_id, {"stage": "revise_logic", "content": updated, "repair_receipts": repair_receipts})
                 content += f"\n\n返工线索 {index + 1}。"
         self.assertEqual(status["status"], "blocked")
         drafts = list((self.store.book_dir("demo") / "workflow" / run.run_id / "chapter-0001" / "drafts").glob("*.md"))

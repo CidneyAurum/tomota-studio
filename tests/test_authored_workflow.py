@@ -75,9 +75,16 @@ class AuthoredWorkflowTests(unittest.TestCase):
         }], revision_brief=self.fixture.revision_brief("抄写笔停在纸上。", "review_continuity"))
         engine.submit(run_id, failure)
         self.assertEqual(self.current().current_stage, "revise_continuity")
+        self.assertIn("author_realization", engine.next_action(run_id)["output_schema"]["required"])
         revised = content.replace("抄写笔停在纸上。", "抄写笔悬在纸面。")
         revision = {"stage": "revise_continuity", "content": revised,
                     "author_realization": receipts}
+        revision["repair_receipts"] = [{
+            "target_id": target["target_id"], "mode": "repaired", "before_quote": "抄写笔停在纸上。",
+            "after_quote": "抄写笔悬在纸面。", "explanation": "把停顿明确为悬笔动作",
+            "preservation": {"before_quote": "档册只记着十二次。", "after_quote": "档册只记着十二次。",
+                             "explanation": "保留官方记录与钟声矛盾"},
+        } for target in engine._polish_ledger(self.current())["targets"]]
         with self.assertRaises(WorkflowError):
             engine.submit(run_id, revision)
         revision["author_realization"] = [{**receipt, "quote": "抄写笔悬在纸面。"} for receipt in receipts]

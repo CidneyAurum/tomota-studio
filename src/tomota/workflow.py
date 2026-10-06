@@ -14,6 +14,7 @@ from typing import Any
 from .authors import AuthorService, HARD_POLICY_RULES, evaluate_statistical_targets
 from .deslop import DeslopFinding, run_deslop_lint
 from .models import ChapterContract, ReviewFinding, ReviewGate, WorkflowRun, utc_now
+from .polish import add_findings, apply_revision, verify_repairs
 from .quality_context import build_corpus_prose_guard, compare_current_to_corpus, summarize_confirmed_revision
 from .review import ChapterReviewer, STRICT_GATES
 from .router import SkillRouter
@@ -891,6 +892,8 @@ class WorkflowEngine:
             )
 
     def _submit_design(self, run: WorkflowRun, value: dict[str, Any]) -> None:
+        receipts = value.get("repair_receipts")
+        value = {key: item for key, item in value.items() if key != "repair_receipts"}
         self._require_nonempty(value, [
             "scenes", "dialogue_pressure_plan", "character_knowledge", "foreshadow_actions", "core_reveal_closeup",
             "reader_experience_contract", "continuity_handoff", "constraint_application",
@@ -921,7 +924,14 @@ class WorkflowEngine:
                 "constraint_id", "source", "scene_ids", "execution", "acceptance_test", "conflict_status",
             ], "约束落地记录")
         self._validate_design_constraint_application(run, value)
+        polish = self._polish_ledger(run)
+        if polish.get("targets"):
+            previous = (self._stage_dir(run) / "chapter_design.json").read_text(encoding="utf-8")
+            updated = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+            polish = self._polish_validate(apply_revision, polish, receipts, previous, updated)
         self._write_artifact(run, "chapter_design", value)
+        if polish:
+            self._save_polish_ledger(run, polish)
 
     def _validate_design_constraint_application(self, run: WorkflowRun, design: dict[str, Any]) -> None:
         """Prove that hard planning/style rules were compiled into executable scenes.
@@ -1090,6 +1100,18 @@ class WorkflowEngine:
         gate = self._gate_from_value(run.current_stage, value)
         source_text = self._review_source_text(run)
         evidence_map = self._review_evidence_map(value.get("evidence"), source_text, field_path="evidence")
+        # A failed review is also an authority: its diagnoses drive rewriting.
+        # Ground each individual finding, not just an unrelated top-level quote.
+        finding_ids: set[str] = set()
+        for index, finding in enumerate(gate.findings):
+            if finding.finding_id in finding_ids:
+                raise WorkflowError(
+                    "审查 finding_id 不得重复，避免不同修复目标互相覆盖",
+                    code="artifact_schema_invalid", failure_class="contract",
+                    field_path=f"findings[{index}].finding_id", retryable=True,
+                )
+            finding_ids.add(finding.finding_id)
+            self._require_grounded_quote(finding.quote, source_text, f"findings[{index}].quote")
         revision_brief = value.get("revision_brief")
         if not isinstance(revision_brief, list):
             raise WorkflowError(
@@ -1143,6 +1165,30 @@ class WorkflowEngine:
         if run.current_stage == "cold_review":
             answers = value.get("reader_answers")
             self._require_nonempty(answers or {}, ["who", "does_what", "why", "referents", "situation_change", "reason_to_continue"], "无提示冷审读者回答")
+        # Reject malformed failures before persisting anything that a subsequent
+        # draft prompt might mistake for an accepted repair instruction.
+        if not gate.passed:
+            if not gate.findings:
+                raise WorkflowError(
+                    "未通过的审查门必须至少包含一条完整 finding",
+                    code="artifact_schema_invalid", failure_class="contract",
+                    field_path="findings", expected="non-empty array when passed=false",
+                    actual=value.get("findings"), retryable=True,
+                )
+            self._validate_revision_brief(revision_brief)
+        polish = self._polish_ledger(run)
+        if gate.passed and any(item["gate"] == run.current_stage for item in polish.get("targets", [])):
+            polish = self._polish_validate(verify_repairs, polish, run.current_stage,
+                                           value.get("repair_verification"), source_text)
+        elif not gate.passed:
+            # Global deterministic findings use a real source anchor; their
+            # original requirement is retained rather than inventing a quote.
+            findings = [{**item.to_dict(), "quote": item.quote if item.quote and item.quote in source_text else source_text[:160]}
+                        for item in gate.findings]
+            polish = self._polish_validate(add_findings, polish, run.current_stage, findings, source_text,
+                                           [str(item["protected_content"]) for item in revision_brief])
+            if run.current_stage == "design_review":
+                polish["failed_rounds"] = int(polish.get("failed_rounds", 0)) + 1
         accepted = {
             **value,
             **gate.to_dict(),
@@ -1151,6 +1197,8 @@ class WorkflowEngine:
             "review_lineage": self._review_binding(run, run.current_stage),
         }
         self._write_artifact(run, run.current_stage, accepted)
+        if polish:
+            self._save_polish_ledger(run, polish)
         if gate.passed and not gate.findings:
             following = {
                 "design_review": "draft", "review_logic": "review_voice", "review_voice": "review_continuity",
@@ -1166,6 +1214,10 @@ class WorkflowEngine:
             )
         self._validate_revision_brief(revision_brief)
         if run.current_stage == "design_review":
+            if polish.get("failed_rounds", 0) > run.max_revisions:
+                run.status = "blocked"
+                self.store.update_chapter_status(run.book_id, int(run.current_chapter), "blocked")
+                return
             self._advance(run, "chapter_design", f"设计审查退回：{len(gate.findings)} 个问题")
             return
         if run.revision_round >= run.max_revisions:
@@ -1413,6 +1465,30 @@ class WorkflowEngine:
             for finding in findings
         ]
 
+    def _polish_ledger(self, run: WorkflowRun) -> dict[str, Any]:
+        name = "design_polish_ledger" if run.current_stage in {"chapter_design", "design_review"} else "polish_ledger"
+        return self._read_json(self._stage_dir(run) / f"{name}.json")
+
+    def _save_polish_ledger(self, run: WorkflowRun, value: dict[str, Any]) -> None:
+        name = "design_polish_ledger" if run.current_stage in {"chapter_design", "design_review"} else "polish_ledger"
+        self._write_artifact(run, name, value)
+
+    def _record_final_repairs(self, run: WorkflowRun, failures: list[str], gate: str, content: str) -> None:
+        findings = [{"finding_id": "final-" + self._canonical_hash(failure)[:16],
+                     "quote": content[:160], "violated_rule": failure, "repair_requirement": failure}
+                    for failure in dict.fromkeys(failures)]
+        ledger = self._polish_validate(add_findings, self._polish_ledger(run), gate, findings, content,
+                                      ["保留所有已确认 Canon、角色知识边界和有效因果；不得为凑字数或过检查破坏正文"])
+        self._save_polish_ledger(run, ledger)
+
+    @staticmethod
+    def _polish_validate(operation: Any, *args: Any) -> dict[str, Any]:
+        try:
+            return operation(*args)
+        except ValueError as exc:
+            raise WorkflowError(str(exc), code="repair_evidence_invalid", failure_class="evidence",
+                                field_path="polish", retryable=True) from exc
+
     def _submit_draft(self, run: WorkflowRun, value: dict[str, Any]) -> None:
         content = str(value.get("content", "")).strip()
         if not content and run.current_stage in REVISION_STAGES and isinstance(value.get("replacements"), list):
@@ -1439,10 +1515,16 @@ class WorkflowEngine:
             )
         revised = run.current_stage in REVISION_STAGES
         self._validate_author_realization(run, value.get("author_realization"), content)
+        polish = self._polish_ledger(run)
+        if revised and polish.get("targets"):
+            polish = self._polish_validate(apply_revision, polish, value.get("repair_receipts"),
+                                           self._current_draft(run), content)
         version = self._draft_versions(run) + 1
         path = self._stage_dir(run) / "drafts" / f"draft-v{version:02d}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content + "\n", encoding="utf-8")
+        if polish:
+            self._write_artifact(run, "polish_ledger", polish)
         self._write_artifact(run, "draft_self_check", {
             "draft_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             "author_realization": value.get("author_realization", []),
@@ -1457,6 +1539,10 @@ class WorkflowEngine:
         self._advance(run, following, f"工作稿 v{version:02d} 已保存")
 
     def _submit_canon(self, run: WorkflowRun, value: dict[str, Any]) -> None:
+        if any(item.get("status") != "verified" for item in self._polish_ledger(run).get("targets", [])):
+            raise WorkflowError("仍有未独立复核关闭的修复目标，不得提取并提交最终 Canon",
+                                code="repair_evidence_invalid", failure_class="evidence",
+                                field_path="polish", retryable=True)
         delta_fields = ["facts", "character_states", "relationships", "open_threads", "foreshadowing"]
         missing = [field for field in [*delta_fields, "evidence"] if field not in value]
         invalid = [field for field in [*delta_fields, "evidence"] if field in value and not isinstance(value[field], list)]
@@ -1531,6 +1617,7 @@ class WorkflowEngine:
                 for marker in ("正文长度", "重复段落", "总结式结尾")
             )
             revision_stage = "revise_logic" if body_failure else "revise_continuity"
+            self._record_final_repairs(run, report.hard_failures, REVISION_STAGES[revision_stage], content)
             self._advance(run, revision_stage, f"最终确定性审查退回：{failures}")
             return
         prior = self.store.load_canon(run.book_id)
@@ -1540,6 +1627,7 @@ class WorkflowEngine:
         hard_regressions = [item for item in regressions if item["severity"] == "hard"]
         if hard_regressions:
             detail = "；".join(str(item["detail"]) for item in hard_regressions)
+            self._record_final_repairs(run, [str(item["detail"]) for item in hard_regressions], "review_continuity", content)
             self._write_artifact(run, "final_validation", {
                 "stage": "final_validation", "passed": False,
                 "evidence": [str(item["detail"]) for item in hard_regressions],
@@ -2293,7 +2381,7 @@ class WorkflowEngine:
             schema = {"type": "array", "items": cls._schema_from_shape(value[0], field=field) if value else {}}
             # constraint_application 允许为空（system 兼容运行无约束时合法）；"必须映射"
             # 的强制由 _validate_*_constraint_application 的 required 校验负责。
-            if value and field not in {"findings", "revision_brief", "constraint_application", "conflict_dimensions", "author_realization"}:
+            if value and field not in {"findings", "revision_brief", "constraint_application", "conflict_dimensions", "author_realization", "repair_verification"}:
                 schema["minItems"] = 1
             return schema
         if isinstance(value, bool):
@@ -2368,7 +2456,7 @@ class WorkflowEngine:
                 }},
             }]
         if stage in REVISION_STAGES:
-            schema["required"] = ["stage"]
+            schema["required"] = [key for key in schema["required"] if key not in {"content", "replacements"}]
             schema["oneOf"] = [{"required": ["content"]}, {"required": ["replacements"]}]
         return schema
 
@@ -2592,6 +2680,15 @@ class WorkflowEngine:
                 "写作/返工提交的是自检；review_voice 必须独立重读当前正文确认，不得直接相信或复制自检结论。"
                 "若方法没有落实，审查必须 passed=false 并给出 finding 和 revision_brief，不得用总体风格评价替代逐条验收。\n"
             )
+        if context.get("repair_targets"):
+            review_rule += (
+                "\n## 定向打磨与独立验收\n"
+                "repair_receipts 必须逐项覆盖 repair_targets；本轮 needs_revision 不能标记 preserved。"
+                "before_quote 包含目标完整锚点，after_quote 展示修复后片段；仅空白或无关改动不算修复。"
+                "preservation 必须说明 protected_content 的保留证据与改写副作用。"
+                "审查通过前用 repair_verification 独立逐项确认；未解决则 passed=false、repair_verification 可为 []，"
+                "并用 findings 与 revision_brief 给出仍需修改之处。不得复制写作者自评作为结论。\n"
+            )
         envelope = {
             "schema_version": action.get("schema_version"), "action_id": action.get("action_id"),
             "inputs_hash": action.get("inputs_hash"), "input_hashes": action.get("input_hashes"),
@@ -2801,6 +2898,18 @@ class WorkflowEngine:
         ]
 
     def _stage_context(self, run: WorkflowRun) -> dict[str, Any]:
+        context = self._base_stage_context(run)
+        ledger = self._polish_ledger(run)
+        if ledger.get("targets") and (run.current_stage in REVISION_STAGES or run.current_stage in REVIEW_STAGES or run.current_stage == "chapter_design"):
+            targets = ledger["targets"] if run.current_stage in REVISION_STAGES or run.current_stage == "chapter_design" else [
+                item for item in ledger["targets"] if item["gate"] == run.current_stage]
+            if targets:
+                context["repair_targets"] = [{key: value for key, value in item.items() if key != "history"} for item in targets]
+                context["repair_draft_hash"] = ledger["draft_hash"]
+                context["repair_rule"] = "逐项修复并保留有效内容；正文变更使所有旧修复确认失效，对应审查必须独立验证，不得复制写作者自评"
+        return context
+
+    def _base_stage_context(self, run: WorkflowRun) -> dict[str, Any]:
         stage = run.current_stage
         chapter_scope = int(run.current_chapter) if run.current_chapter is not None and stage != "story_foundation" else None
         foundation_contract = self.store.effective_foundation_contract(run.book_id, chapter_number=chapter_scope)
@@ -3133,6 +3242,23 @@ class WorkflowEngine:
             }
         else:
             schema = {"stage": stage}
+        polish_targets = self._polish_ledger(run).get("targets", [])
+        if (stage in REVISION_STAGES or stage == "chapter_design") and polish_targets:
+            schema["repair_receipts"] = [{
+                "target_id": "repair_targets 中的真实编号", "mode": "repaired|preserved",
+                "before_quote": "旧稿中包含目标完整 anchor_quote 的片段",
+                "after_quote": "新版正文中体现修复的完整片段",
+                "explanation": "如何解决该问题，不得只说已修改",
+                "preservation": {"before_quote": "旧稿中要保护的有效内容", "after_quote": "新版正文中的对应内容",
+                                 "explanation": "逐项核对 protected_content，说明事实、动机和因果为何未退化"},
+            }]
+        if stage in REVIEW_STAGES and any(item["gate"] == stage for item in polish_targets):
+            schema["repair_verification"] = [{
+                "target_id": "本审查对应的真实修复编号", "resolved": True,
+                "quote": "当前正文中支持问题已解决的逐字引文",
+                "explanation": "独立核对旧问题与新实现；未解决则整个审查不通过并提出 finding",
+                "preservation_check": "核对保留约束与修复副作用，不能直接相信写作者自评",
+            }]
         if stage in {"draft", "review_voice", *REVISION_STAGES} and self._prose_author_rules(run):
             schema["author_realization"] = [{
                 "rule_id": "当前正文策略中的真实 rule_id",
