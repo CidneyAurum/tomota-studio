@@ -1,24 +1,13 @@
-# Bundled writing skill
+# Bundled neutral writing logic
 
-Tomota Studio ships with `skills/webnovel-writing` as a portable fallback. It
-preserves and prefers an existing user-level `oh-story-claudecode` or
-`webnovel-writing` installation. A clean computer without either uses this
-bundled edition automatically, so Studio does not require a separate install.
+Tomota ships a small, sealed logic core under `skills/webnovel-writing` for
+backward-compatible discovery. Despite the legacy directory name, it contains
+no platform, market, genre, audience, plot, pacing, or prose preset.
 
-The bundled edition includes the workflow instructions, ten specialist modules,
-templates, review rules, and curated positive/negative examples. Large source
-novel corpora, downloaded articles, PDFs, scraping tools, and generated corpus
-indexes are intentionally excluded from this portable distribution.
+Installed third-party story skills may be inventoried for diagnostics, but
+their prose, examples, templates, corpora, and lint scripts are not generation
+inputs. A change in those packages cannot alter or stop a Tomota workflow.
 
-To expose the same Skill to Codex, run from the repository root:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install_codex_skill.ps1
-```
-
-If a Skill with the same name already exists, the script stops without changing
-it. Use `-Replace` only when replacement is intended; the old directory is moved
-to a timestamped backup rather than deleted.
-
-An advanced user can point Tomota at another complete Skill without modifying
-the repository by setting `TOMOTA_WEBNOVEL_SKILL_ROOT`.
+Authorial style enters only through a user-published author profile version and
+the book's `CompiledWritingPolicy`. The neutral core is lower priority than the
+user, Canon, book/volume/chapter contracts, book overrides, and author policy.

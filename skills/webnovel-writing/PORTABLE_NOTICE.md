@@ -1,11 +1,6 @@
-# Portable edition notice
+# Portable neutral core
 
-This is the executable core of the `webnovel-writing` Skill bundled with Tomota
-Studio. It contains the main instructions, modular runtime rules, templates, and
-review examples used by the workflow engine.
-
-The portable repository does not contain downloaded novels, article corpora,
-PDF demonstrations, scraping assets, or generated corpus indexes. This keeps the
-deployment small and avoids treating third-party source texts as application
-dependencies. A user-owned full Skill can be selected with the
-`TOMOTA_WEBNOVEL_SKILL_ROOT` environment variable.
+This directory is a compatibility fallback. Its role is limited to universal
+causality, character, continuity, dialogue, transition, evidence, and output
+hygiene checks. It is not a platform-writing preset and is not an authority on
+genre, structure, pacing, chapter endings, or prose voice.

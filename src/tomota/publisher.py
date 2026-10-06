@@ -59,12 +59,21 @@ class FanqiePublisher:
 
     def prepare_batch(self, book_id: str, chapter_numbers: list[int], schedule: dict[str, str]) -> PublishBatch:
         import uuid
+        chapters = []
         for number in chapter_numbers:
             chapter = self.store.get_chapter(book_id, number)
             if not chapter:
                 raise PublishBlocked(f"chapter {number} does not exist")
-            if not self.store.is_release_ready(book_id, number):
+            content = self.store.read_content(book_id, number)
+            source = self.store.approved_review_source(chapter, content=content)
+            if source is None:
                 raise PublishBlocked(f"chapter {number} lacks strict approval evidence: {chapter['status']}")
+            chapters.append({
+                "chapter_number": number, "title": chapter["title"], "word_count": chapter["word_count"],
+                "content_fingerprint": hashlib.sha256(publication_content(content).encode("utf-8")).hexdigest(),
+                "review_source": source,
+                "scheduled_at": schedule.get(str(number)),
+            })
         batch = PublishBatch(f"batch-{uuid.uuid4().hex[:12]}", book_id, chapter_numbers, schedule)
         self.store.create_batch(batch)
         preview = {
@@ -72,16 +81,7 @@ class FanqiePublisher:
             "book_id": book_id,
             "book_title": (self.store.get_book(book_id) or {}).get("title", ""),
             "status": "preview",
-            "chapters": [
-                {
-                    "chapter_number": number,
-                    "title": self.store.get_chapter(book_id, number)["title"],
-                    "word_count": self.store.get_chapter(book_id, number)["word_count"],
-                    "content_fingerprint": hashlib.sha256(publication_content(self.store.read_content(book_id, number)).encode("utf-8")).hexdigest(),
-                    "scheduled_at": schedule.get(str(number)),
-                }
-                for number in chapter_numbers
-            ],
+            "chapters": chapters,
             "cloud_write_performed": False,
             "next_confirmation": f"PUBLISH {batch.batch_id}",
         }
@@ -106,14 +106,21 @@ class FanqiePublisher:
                 skipped.append(number)
                 continue
             try:
+                chapter, content = self.browser_jobs.validated_source(batch, number)
                 response = self.driver.submit_chapter(
                     book_id=batch.book_id,
                     chapter_number=number,
                     title=chapter["title"],
-                    content=self.store.read_content(batch.book_id, number),
+                    content=content,
                     scheduled_at=batch.schedule.get(str(number)),
                 )
-                status = response.get("status", "submitted")
+                if not isinstance(response, dict):
+                    raise PublishBlocked("driver returned an invalid receipt")
+                status = response.get("status")
+                if status not in {"submitted", "scheduled", "published", "dry_run"}:
+                    raise PublishBlocked(f"driver did not confirm success: {status or 'missing status'}")
+                if not isinstance(response.get("platform_id"), str) or not response["platform_id"].strip():
+                    raise PublishBlocked("successful driver receipt is missing platform_id")
                 self.store.update_chapter_status(batch.book_id, number, "submitted" if status != "dry_run" else "dry_run", platform_id=response.get("platform_id"), scheduled_at=response.get("scheduled_at"))
                 submitted.append(number)
             except (PublishBlocked, TimeoutError) as exc:
@@ -126,4 +133,4 @@ class FanqiePublisher:
                 break
         status = "submitted" if not failed else ("partial" if submitted else "failed")
         self.store.update_batch(batch.batch_id, status)
-        return PublishResult(batch.batch_id, status, submitted, skipped, failed, "dry-run completed" if status == "submitted" and any(item.startswith("dry-") for item in [self.store.get_chapter(batch.book_id, n).get("platform_id", "") for n in submitted]) else "")
+        return PublishResult(batch.batch_id, status, submitted, skipped, failed, "dry-run completed" if status == "submitted" and any(str(self.store.get_chapter(batch.book_id, n).get("platform_id") or "").startswith("dry-") for n in submitted) else "")

@@ -4,13 +4,18 @@ export type AgentJobStatus =
   | "auth_required"
   | "interrupted"
   | "succeeded"
+  | "awaiting_choice"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "timeout";
 
 export interface AgentJob {
   id: string;
   runId: string;
   bookId: string;
+  scopeType?: "book" | "author" | "system";
+  scopeId?: string;
+  actionId?: string;
   chapter: number | null;
   stage: string;
   status: AgentJobStatus;
@@ -37,6 +42,31 @@ export interface JobEvent {
   createdAt: string;
 }
 
+export type ModelProviderKind = "openai_compatible" | "openai_responses" | "anthropic" | "gemini";
+export type ModelRole = "generation" | "review" | "workbench" | "review_arbitration";
+
+export interface ModelProviderRecord {
+  id: string;
+  label: string;
+  kind: ModelProviderKind;
+  baseUrl: string;
+  apiKeyConfigured: boolean;
+  models: string[];
+  status: "unchecked" | "ready" | "error";
+  error: string;
+  lastCheckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ModelRouteRecord {
+  role: ModelRole;
+  providerId: string;
+  modelId: string;
+  fallbackEnabled: boolean;
+  updatedAt: string;
+}
+
 export interface WorkflowFeedback {
   id: string;
   runId: string;
@@ -48,6 +78,100 @@ export interface WorkflowFeedback {
   jobId: string | null;
   createdAt: string;
   appliedAt: string | null;
+}
+
+export interface PlanningConversationMessage {
+  id: string;
+  bookId: string;
+  scopeType: "new_book" | "book" | "volume" | "chapter" | "chapters" | "workbench";
+  scopeId: string;
+  role: "user" | "assistant";
+  text: string;
+  proposal: Record<string, unknown> | null;
+  warnings: string[];
+  jobId: string;
+  createdAt: string;
+}
+
+export interface AuthorPreference {
+  id: string;
+  bookId: string;
+  category: "人物声音" | "对白密度" | "伏笔边界" | "节奏" | "章末" | "去AI味" | "题材偏好";
+  rule: string;
+  evidence: string;
+  enabled: boolean;
+  sourceJobId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RevisionBriefRecord {
+  id: string;
+  bookId: string;
+  chapter: number;
+  feedback: string;
+  sourceJobId: string;
+  status: "pending" | "started" | "applied";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReaderFeedbackRecord {
+  id: string;
+  bookId: string;
+  scopeType: "book" | "volume" | "chapter";
+  scopeId: string;
+  content: string;
+  status: "evaluating" | "evaluated" | "reworking" | "applied" | "needs_clarification" | "failed";
+  evaluation: Record<string, unknown>;
+  parentFeedbackId: string | null;
+  rootFeedbackId: string;
+  sequence: number;
+  supersededById: string | null;
+  contextManifest: Record<string, unknown>;
+  reviewMode: "targeted" | "full_scope";
+  requestedChapters: number[];
+  jobId: string | null;
+  workflowId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PersonalTalkRecord {
+  id: string;
+  authorId: string;
+  title: string;
+  content: string;
+  linkedBookId: string | null;
+  progressSnapshot: Record<string, unknown>;
+  personaSnapshot: Record<string, unknown>;
+  personaHash: string;
+  styleInfluence: "none" | "current_book";
+  status: "draft" | "ready" | "published" | "archived";
+  sourceJobId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+}
+
+export type AgentPlanStatus = "pending" | "confirmed" | "rejected" | "executed" | "failed";
+
+export interface AgentPlanRecord {
+  jobId: string;
+  bookId: string;
+  status: AgentPlanStatus;
+  summary: string;
+  artifact: Record<string, unknown>;
+  createdAt: string;
+  confirmedAt: string | null;
+  executedAt: string | null;
+}
+
+export interface AgentExecutionResult {
+  planId: string;
+  status: "executed" | "failed";
+  executedAt: string;
+  actions: Array<{type: string; status: "succeeded" | "skipped" | "failed"; detail: string}>;
 }
 
 export interface FanqieAccount {
@@ -123,4 +247,16 @@ export interface PublishBatchPreview {
     ai_usage_value: "no";
     create_and_update_paths: string[];
   };
+  recovery?: {
+    state: "ready" | "safe_retry" | "reconcile_required";
+    result_status: string | null;
+    result_exists: boolean;
+    uncertain_chapters: number[];
+  };
+}
+
+export interface OneClickBatchResolution {
+  batch: PublishBatchPreview | null;
+  disposition: "created" | "resumed" | "rebuilt" | "already_submitted";
+  message: string;
 }

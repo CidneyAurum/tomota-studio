@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { extname, join, relative, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
 import { safeBookPath } from "./store.js";
 
@@ -46,23 +46,65 @@ export async function listProjectFiles(root: string, bookId: string): Promise<Pr
 }
 
 export async function readProjectFile(root: string, path: string): Promise<{path: string; content: string; hash: string; modifiedAt: string; editable: boolean}> {
-  const target = safeBookPath(root, path);
-  if (!readableExtensions.has(extname(target).toLowerCase())) throw new Error("不支持的文件类型");
-  const bytes = await readFile(target);
-  const info = await stat(target);
-  const bookRelative = relative(resolve(root, "books"), target).replaceAll("\\", "/").split("/");
-  const category = bookRelative[1] || "";
-  return { path: target, content: bytes.toString("utf8"), hash: createHash("sha256").update(bytes).digest("hex"), modifiedAt: info.mtime.toISOString(), editable: editableRoots.has(category) };
+  return readCheckedFile(root, path);
 }
 
-export async function saveProjectFile(root: string, path: string, content: string, expectedHash: string): Promise<{hash: string; modifiedAt: string}> {
-  const current = await readProjectFile(root, path);
-  if (!current.editable) throw new Error("该文件由工作流维护，只能查看，不能直接覆盖");
-  if (current.hash !== expectedHash) throw new Error("文件已被其他流程更新，请刷新后再保存");
+function readCheckedFile(root: string, path: string): {path: string; content: string; hash: string; modifiedAt: string; editable: boolean} {
   const target = safeBookPath(root, path);
-  await writeFile(target, content, "utf8");
-  const info = await stat(target);
-  return { hash: createHash("sha256").update(content).digest("hex"), modifiedAt: info.mtime.toISOString() };
+  if (!readableExtensions.has(extname(target).toLowerCase())) throw new Error("不支持的文件类型");
+  const canonical = safeBookPath(root, realpathSync(target));
+  const descriptor = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+  try {
+    // Validate the opened object as well as its path, before reading any bytes.
+    // There is no event-loop yield between validation and descriptor-based IO.
+    const info = fstatSync(descriptor);
+    const current = lstatSync(safeBookPath(root, target));
+    if (!info.isFile() || info.nlink !== 1 || current.dev !== info.dev || current.ino !== info.ino || realpathSync(target) !== canonical) {
+      throw new Error("文件路径或链接已变化，请刷新后重试");
+    }
+    const bytes = readFileSync(descriptor);
+    const bookRelative = relative(resolve(root, "books"), canonical).replaceAll("\\", "/").split("/");
+    const category = bookRelative[1] || "";
+    return { path: canonical, content: bytes.toString("utf8"), hash: createHash("sha256").update(bytes).digest("hex"), modifiedAt: info.mtime.toISOString(), editable: editableRoots.has(category) };
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+const fileSaves = new Map<string, Promise<void>>();
+
+export async function saveProjectFile(root: string, path: string, content: string, expectedHash: string, assertWritable?: () => void): Promise<{hash: string; modifiedAt: string}> {
+  const canonical = safeBookPath(root, realpathSync(safeBookPath(root, path)));
+  const key = process.platform === "win32" ? canonical.toLowerCase() : canonical;
+  const previous = fileSaves.get(key) || Promise.resolve();
+  let release!: () => void;
+  const pending = new Promise<void>((resolveSave) => {release = resolveSave;});
+  fileSaves.set(key, pending);
+  await previous;
+  let temporary: string | undefined;
+  try {
+    assertWritable?.();
+    const current = readCheckedFile(root, path);
+    if (current.path !== canonical) throw new Error("文件路径已变化，请刷新后重试");
+    if (!current.editable) throw new Error("该文件由工作流维护，只能查看，不能直接覆盖");
+    if (current.hash !== expectedHash) throw new Error("文件已被其他流程更新，请刷新后再保存");
+    temporary = safeBookPath(root, join(dirname(canonical), `.${basename(canonical)}.${randomUUID()}.tmp`));
+    writeFileSync(temporary, content, {encoding: "utf8", flag: "wx", mode: statSync(canonical).mode});
+    // Recheck just before atomic replacement, including non-editor writers.
+    const latest = readCheckedFile(root, path);
+    if (latest.path !== canonical || latest.hash !== expectedHash) throw new Error("文件已被其他流程更新，请刷新后再保存");
+    safeBookPath(root, temporary);
+    renameSync(temporary, canonical);
+    temporary = undefined;
+    return { hash: createHash("sha256").update(content).digest("hex"), modifiedAt: statSync(canonical).mtime.toISOString() };
+  } finally {
+    try {
+      if (temporary) unlinkSync(safeBookPath(root, temporary));
+    } finally {
+      release();
+      if (fileSaves.get(key) === pending) fileSaves.delete(key);
+    }
+  }
 }
 
 export async function collectReviewFindings(root: string, bookId: string): Promise<Array<Record<string, unknown>>> {
@@ -72,7 +114,7 @@ export async function collectReviewFindings(root: string, bookId: string): Promi
   const result: Array<Record<string, unknown>> = [];
   for (const file of files.filter((item) => item.category === "workflow" && /review|cold/.test(item.name) && item.name.endsWith(".json"))) {
     try {
-      const value = JSON.parse(await readFile(file.path, "utf8")) as Record<string, unknown>;
+      const value = JSON.parse((await readProjectFile(root, file.path)).content) as Record<string, unknown>;
       for (const finding of Array.isArray(value.findings) ? value.findings : []) {
         if (finding && typeof finding === "object") result.push({ ...finding as Record<string, unknown>, source: file.path, gate: value.gate || value.stage || "review" });
       }

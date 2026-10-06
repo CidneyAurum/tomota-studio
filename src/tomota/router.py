@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 PLANNING_CHAIN = ["concept_planning"]
 OUTLINE_CHAIN = ["concept_planning", "volume_outline"]
 OPENING_CHAIN = ["concept_planning", "opening"]
-SCAN_CHAIN = ["scan", "concept_planning"]
-ANALYZE_CHAIN = ["analyze", "volume_outline"]
-COVER_CHAIN = ["cover"]
+SCAN_CHAIN = ["concept_planning"]
+ANALYZE_CHAIN = ["plot_logic", "character_consistency", "consistency_review"]
+COVER_CHAIN: list[str] = []
 DESLOP_CHAIN = ["anti_ai_voice"]
 CHAPTER_CHAIN = [
     "plot_logic",
@@ -53,17 +53,14 @@ class SkillRouter:
         "对白": "dialogue",
         "台词": "dialogue",
         "章末": "chapter_ending",
-        "钩子": "chapter_ending",
-        "追更": "chapter_ending",
+        "承接": "chapter_ending",
         "AI": "anti_ai_voice",
         "模板": "anti_ai_voice",
         "空泛": "anti_ai_voice",
         "套话": "anti_ai_voice",
-        "反转": "reversal_toolkit",
-        "打脸": "style_combat_face",
-        "战斗": "style_combat_face",
-        "女频": "female_audience",
-        "情感": "emotion_system",
+        "反转": "plot_logic",
+        "战斗": "plot_logic",
+        "情感": "character_consistency",
     }
 
     def route(self, task: str, stage: str | None = None, issue_tags: list[str] | None = None) -> Route:
@@ -83,18 +80,13 @@ class SkillRouter:
             return Route("planning", PLANNING_CHAIN.copy(), ["简介或选题任务必须先经过 concept_planning"], tags)
         if normalized in {"outline", "volume", "章纲", "分卷"}:
             return Route("outline", OUTLINE_CHAIN.copy(), ["长篇结构任务需要 concept_planning 和 volume_outline"], tags)
-        if normalized in {"opening", "开头", "黄金三章"}:
-            return Route("opening", OPENING_CHAIN.copy(), ["开头任务需要先确认卖点和异常局面"], tags)
+        if normalized in {"opening", "开头"}:
+            return Route("opening", OPENING_CHAIN.copy(), ["开头任务需要先确认人物、处境和具体变化"], tags)
         if normalized in {"review", "审查", "完稿"}:
             return Route("review", REVIEW_CHAIN.copy(), ["每章完稿强制进入 consistency_review"], tags)
         if normalized in {"chapter", "draft", "正文", "章节", "续写"}:
             reasons = ["正文执行链先修底层逻辑和人物，再处理场景、对白、章末与去 AI 味", "每章写完强制 consistency_review"]
             chain = CHAPTER_CHAIN.copy()
-            # If tags request specialized modules, inject them
-            if "反转" in tags and "reversal_toolkit" not in chain:
-                chain.insert(chain.index("chapter_ending"), "reversal_toolkit")
-            if ("打脸" in tags or "战斗" in tags) and "style_combat_face" not in chain:
-                chain.insert(chain.index("chapter_ending"), "style_combat_face")
             return Route("chapter", chain, reasons, tags)
         raise ValueError(f"unsupported writing stage: {stage or normalized}")
 
@@ -108,7 +100,7 @@ class SkillRouter:
             return "cover"
         if any(token in text for token in ["去ai味", "去味", "精修"]):
             return "deslop"
-        if any(token in text for token in ["章纲", "分卷", "黄金三章", "前20章"]):
+        if any(token in text for token in ["章纲", "分卷", "多章规划"]):
             return "outline"
         if any(token in text for token in ["开头", "第一章"]):
             return "opening"

@@ -10,8 +10,9 @@
     "dev": "concurrently -k -n api,ui -c magenta,cyan \"tsx watch server/index.ts\" \"vite\"",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && vite build",
     "start": "node dist-server/index.js",
-    "test": "tsx --test tests/antigravity.test.ts tests/fanqie.test.ts tests/store.test.ts",
-    "test:e2e": "tsx --test tests/e2e/studio.test.ts"
+    "test": "tsx --test tests/antigravity.test.ts tests/book-transactions.test.ts tests/deslop.test.ts tests/fanqie.test.ts tests/model-providers.test.ts tests/navigation.test.ts tests/planning.test.ts tests/store.test.ts tests/runtime-regressions.test.ts tests/runtime-api.test.ts tests/runtime-admission.test.ts tests/runtime-optimizations.test.ts",
+    "test:e2e": "tsx --test tests/e2e/studio.test.ts tests/e2e/workspace-editor.test.cjs",
+    "test:publishing": "tsx --test tests/fanqie.test.ts ../tests/test_browser_bridge.mjs ../tests/test_browser_dom.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

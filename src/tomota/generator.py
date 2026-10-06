@@ -218,14 +218,14 @@ class MockGenerator:
     """Deterministic generator used by tests and local pipeline smoke runs."""
 
     def generate_outline(self, prompt_pack: PromptPack, synopsis: str) -> GenerationArtifact:
-        outline = "# 一句话 Hook\n主角在异常局面中被迫作出选择，并因此启动一条持续升级的故事引擎。\n\n# 第一卷\n- 卷目标：建立主线冲突\n- 卷核心冲突：主角与持续阻力正面碰撞\n- 卷高潮：主角完成一次不可逆选择\n- 卷末变化：局面升级，旧规则失效\n\n# 前20章章纲\n- 第1章：异常事件迫使主角行动\n- 第2章：卖点显形，代价出现\n- 第3章：主角第一次反制\n"
+        outline = "# 故事承诺\n主角在异常局面中作出选择，并承担持续产生的后果。\n\n# 因果阶段\n- 阶段目标：建立人物当前目标与阻力\n- 核心冲突：人物选择改变关系或局面\n- 关键变化：主角完成一次不可逆选择\n- 阶段末状态：旧有条件发生变化\n\n# 章节契约示例\n- 第1章：异常事件迫使主角行动\n- 第2章：行动产生具体代价\n- 第3章：主角根据后果重新选择\n"
         return GenerationArtifact("text", outline, prompt_pack, {"operation": "outline", "mock": True})
 
     def generate_chapter(self, prompt_pack: PromptPack, contract: ChapterContract, canon: dict) -> GenerationArtifact:
         paragraphs = [
             f"{contract.title}",
             f"{contract.objective}。主角没有等到局面自行变好，而是先做出了决定。",
-            f"{contract.obstacle}立刻出现，原本简单的选择被推到了更高的代价上。",
+            f"{contract.obstacle}立刻出现，原本简单的选择带来了新的代价。",
             f"{contract.change}。这一拍之后，主角已经不能回到原来的位置。",
             contract.chapter_hook or contract.next_first_beat or "门外传来第二次敲门声。",
         ]

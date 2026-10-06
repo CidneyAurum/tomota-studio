@@ -4,8 +4,7 @@ import json
 import os
 import re
 import subprocess
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,10 +45,21 @@ def find_oh_story_root(skill_root: Path | str | None = None) -> Path | None:
     return None
 
 
-def run_deslop_lint(content: str, *, skill_root: Path | str | None = None) -> list[DeslopFinding]:
-    """Run full deslop lint (Node scripts if available, plus Python rules)."""
+def run_deslop_lint(
+    content: str,
+    *,
+    skill_root: Path | str | None = None,
+    allow_external_rules: bool = False,
+) -> list[DeslopFinding]:
+    """Run Tomota's deterministic, project-owned anti-template checks.
+
+    External skill scripts are opt-in diagnostics only. They are disabled for
+    normal generation/review paths so an installed package cannot silently
+    change a book run.  The built-in Python rules always run and are the
+    auditable baseline used by CLI, pipeline and strict workflow review.
+    """
     findings: list[DeslopFinding] = []
-    root = find_oh_story_root(skill_root)
+    root = find_oh_story_root(skill_root) if allow_external_rules else None
 
     # 1. Try Node scripts if oh-story-claudecode scripts exist
     if root and (root / "skills" / "story-deslop" / "scripts" / "check-ai-patterns.js").is_file():
@@ -113,10 +123,35 @@ ABSTRACT_PATTERNS = [
     ("时间仿佛静止", "时间静止套话"),
     ("这一刻她明白", "总结体领悟"),
     ("这一刻他明白", "总结体领悟"),
-    ("命运的齿轮", "命运齿轮套话"),
+    ("命运的齿轮", "作者总结套话"),
     ("深吸了一口气", "无意义动作垫字"),
     ("仿佛在诉说着", "拟人套话"),
+    ("嘴角勾起一抹", "公式化微表情"),
+    ("眼中闪过一丝", "公式化微表情"),
+    ("缓缓开口", "公式化对话引导"),
 ]
+
+EXPLANATION_PATTERNS = [
+    ("她不知道的是", "上帝视角剧透"),
+    ("他不知道的是", "上帝视角剧透"),
+    ("殊不知", "上帝视角剧透"),
+    ("这意味着", "替读者解释因果"),
+    ("换句话说", "替读者重复解释"),
+    ("不得不说", "作者跳出场景评价"),
+    ("值得一提的是", "说明文式插入"),
+    ("之所以", "解释腔因果铺陈"),
+    ("多年以来", "跳出当下概述"),
+    ("原来这一切", "作者回收式解释"),
+]
+
+PSYCHOLOGY_PATTERNS = [
+    (re.compile(r"(?:他|她|我|[\u4e00-\u9fff]{2,4})(?:感到|感觉到|意识到|明白了|知道了)(?:一阵|一丝|无比|十分|非常|有些|些许)?(?:紧张|害怕|恐惧|愤怒|悲伤|失落|震惊|不安|绝望|欣慰|庆幸)"), "直接告知情绪或认知"),
+    (re.compile(r"心(?:中|里)(?:不禁|顿时|忽然)?(?:涌起|升起|泛起|生出)(?:一股|一阵|一丝)?"), "抽象心理反应"),
+]
+
+PARALLEL_MARKER_RE = re.compile(
+    r"(?:不是|没有|不曾|既不|也不|并非|无法|不会|不愿|不敢|不想)[^，,。！？!?\n]{1,24}[，,]"
+)
 
 BANNED_WORDS_CORE = [
     "不免", "不禁", "赫然", "宛若", "依稀", "蓦然", "隐隐", "悄然",
@@ -124,9 +159,61 @@ BANNED_WORDS_CORE = [
     "与此同时", "就在这时", "殊不知",
 ]
 
+# Small, deterministic blocking subset.  These patterns are deliberately
+# narrow: they catch high-risk explanatory scaffolding while leaving ordinary
+# dialogue and genre-specific diction to the semantic reviewer.
+BLOCKING_PATTERNS = [
+    (re.compile(r"不是[^。！？!?\n]{1,32}[，,。！？!?]\s*(?:而是|是)[^。！？!?\n]{1,40}"), "not-is-comparison", "否定铺垫后接肯定翻转，建议直接写后项或改为动作/细节"),
+    (re.compile(r"声音(?:并)?不[大高响亮][^。！？!?\n]{0,20}[却但偏]"), "voice-contrast", "音量反差腔把效果写成解释，建议直接呈现声音造成的现场变化"),
+    (re.compile(r"(?:没有[^。！？!?\n，,]{1,16}[，,]){2}"), "negation-parade", "连续否定清单容易形成模板腔，建议合并为具体动作或结果"),
+]
+
+
+def _line_column(source_line: str, stripped_line: str, stripped_column: int) -> int:
+    """Convert a column in stripped text back to the original source line."""
+    return len(source_line) - len(source_line.lstrip()) + stripped_column
+
+
+def _append_phrase_findings(
+    findings: list[DeslopFinding],
+    *,
+    line_number: int,
+    source_line: str,
+    stripped_line: str,
+    phrases: list[tuple[str, str]],
+    rule_type: str,
+    severity: str,
+    label: str,
+    repair: str,
+) -> None:
+    """Report every deterministic phrase hit with an exact line/column."""
+    for phrase, description in phrases:
+        start = 0
+        while True:
+            column = stripped_line.find(phrase, start)
+            if column < 0:
+                break
+            findings.append(DeslopFinding(
+                rule_type=rule_type,
+                severity=severity,
+                line=line_number,
+                column=_line_column(source_line, stripped_line, column + 1),
+                message=f"发现{label}「{phrase}」（{description}），{repair}",
+                excerpt=stripped_line,
+            ))
+            start = column + len(phrase)
+
 
 def run_python_deslop_lint(content: str, *, root: Path | None = None) -> list[DeslopFinding]:
-    """Pure-Python deslop linter for deterministic checks."""
+    """Pure-Python deterministic deslop checks.
+
+    These are diagnostics rather than a prose authority: a finding asks for
+    contextual review.  Engineering/meta leakage and a small set of highly
+    formulaic explanatory constructions are blocking; the broader phrase and
+    frequency checks remain warning/advisory signals.  This keeps the neutral
+    writing kernel intact while preserving the dedicated anti-AI quality gate
+    in every workflow review.
+    """
     findings: list[DeslopFinding] = []
     lines = content.splitlines()
 
@@ -135,28 +222,80 @@ def run_python_deslop_lint(content: str, *, root: Path | None = None) -> list[De
         if not stripped:
             continue
 
-        # Check AI clichés
-        for phrase, desc in ABSTRACT_PATTERNS:
-            if phrase in stripped:
-                col = stripped.find(phrase) + 1
+        for pattern, rule_type, message in BLOCKING_PATTERNS:
+            match = pattern.search(stripped)
+            if match:
                 findings.append(DeslopFinding(
-                    rule_type="abstract-cliché",
-                    severity="warning",
+                    rule_type=rule_type,
+                    severity="blocking",
                     line=idx,
-                    column=col,
-                    message=f"发现抽象套话「{phrase}」（{desc}），建议改为具体动作或感官细节",
+                    column=_line_column(line, stripped, match.start() + 1),
+                    message=message,
                     excerpt=stripped,
                 ))
 
-        # Check banned words density
-        hits = [w for w in BANNED_WORDS_CORE if w in stripped]
+        _append_phrase_findings(
+            findings,
+            line_number=idx,
+            source_line=line,
+            stripped_line=stripped,
+            phrases=ABSTRACT_PATTERNS,
+            rule_type="abstract-cliché",
+            severity="warning",
+            label="抽象套话",
+            repair="建议改为具体动作或感官细节",
+        )
+        _append_phrase_findings(
+            findings,
+            line_number=idx,
+            source_line=line,
+            stripped_line=stripped,
+            phrases=EXPLANATION_PATTERNS,
+            rule_type="explanation-cliché",
+            severity="warning",
+            label="解释腔",
+            repair="建议交给动作、物件或对白呈现",
+        )
+
+        for pattern, description in PSYCHOLOGY_PATTERNS:
+            for match in pattern.finditer(stripped):
+                findings.append(DeslopFinding(
+                    rule_type="psychological-telling",
+                    severity="warning",
+                    line=idx,
+                    column=_line_column(line, stripped, match.start() + 1),
+                    message=f"发现心理告知「{match.group(0)}」（{description}），建议外化为身体反应、动作或选择",
+                    excerpt=stripped,
+                ))
+
+        parallel_matches = list(PARALLEL_MARKER_RE.finditer(stripped))
+        if len(parallel_matches) >= 3:
+            findings.append(DeslopFinding(
+                rule_type="formulaic-parallelism",
+                severity="warning",
+                line=idx,
+                column=_line_column(line, stripped, parallel_matches[0].start() + 1),
+                message=f"发现连续 {len(parallel_matches)} 组否定/并列铺排，建议保留必要信息并压成一次判断或动作",
+                excerpt=stripped,
+            ))
+
+        hits = [word for word in BANNED_WORDS_CORE if word in stripped]
+        for word in hits:
+            findings.append(DeslopFinding(
+                rule_type="banned-word",
+                severity="advisory",
+                line=idx,
+                column=_line_column(line, stripped, stripped.find(word) + 1),
+                message=f"命中高频 AI 套词「{word}」，需结合语境判断是否改为具体表达",
+                excerpt=stripped,
+            ))
         if len(hits) >= 2:
             findings.append(DeslopFinding(
                 rule_type="banned-words-density",
                 severity="advisory",
                 line=idx,
-                column=1,
-                message=f"单句聚集高频AI连接词：{', '.join(hits)}",
+                column=_line_column(line, stripped, 1),
+                message=f"单句聚集高频 AI 连接词：{', '.join(hits)}",
                 excerpt=stripped,
             ))
 
@@ -166,7 +305,7 @@ def run_python_deslop_lint(content: str, *, root: Path | None = None) -> list[De
                 rule_type="meta-leakage",
                 severity="blocking",
                 line=idx,
-                column=1,
+                column=_line_column(line, stripped, 1),
                 message="检测到 AI 自指元信息泄漏",
                 excerpt=stripped,
             ))
@@ -177,7 +316,7 @@ def run_python_deslop_lint(content: str, *, root: Path | None = None) -> list[De
                 rule_type="engineering-leak",
                 severity="blocking",
                 line=idx,
-                column=1,
+                column=_line_column(line, stripped, 1),
                 message="检测到工程/大纲标记泄漏进正文",
                 excerpt=stripped,
             ))
@@ -185,37 +324,94 @@ def run_python_deslop_lint(content: str, *, root: Path | None = None) -> list[De
     return findings
 
 
-def normalize_punctuation(text: str, *, quote_mode: str = "keep") -> str:
-    """Normalize novel text punctuation into standardized Chinese publishing format."""
-    lines = text.splitlines()
-    normalized_lines: list[str] = []
+_PAUSE_TOKEN_RE = re.compile(r"\.{3,}|…{2,}|-{2,}|—{2,}")
+_SENTENCE_PUNCTUATION = "，,。.!！?？;；:：、…—"
+_CLOSING_DELIMITERS = "”」』）)]】"
+_OPENING_DELIMITERS = "“「『（([【"
 
-    for line in lines:
-        stripped = line.strip()
-        # Remove standalone markdown divider lines
-        if re.match(r"^[-*_]{3,}$", stripped):
+
+def _previous_non_space(text: str, index: int) -> str:
+    while index >= 0:
+        if not text[index].isspace():
+            return text[index]
+        index -= 1
+    return ""
+
+
+def _next_non_space(text: str, index: int) -> str:
+    while index < len(text):
+        if not text[index].isspace():
+            return text[index]
+        index += 1
+    return ""
+
+
+def _normalize_pause_token(text: str, match: re.Match[str]) -> str:
+    """Normalize malformed pause tokens without deleting functional pauses."""
+    token = match.group(0)
+    before = _previous_non_space(text, match.start() - 1)
+    after = _next_non_space(text, match.end())
+
+    # Numeric ranges are data, not dialogue pauses.
+    if before.isdigit() and after.isdigit() and ("-" in token or "—" in token):
+        return "—"
+    # Do not manufacture punctuation immediately inside a quote/bracket edge.
+    if before in _OPENING_DELIMITERS or after in _CLOSING_DELIMITERS and before in _SENTENCE_PUNCTUATION:
+        return ""
+    if "." in token or "…" in token:
+        return "……"
+    return "——"
+
+
+def _normalize_quotes(text: str, quote_mode: str) -> str:
+    if quote_mode == "keep":
+        return text
+    if quote_mode == "ascii":
+        return text.translate(str.maketrans({"「": '"', "」": '"', "『": "'", "』": "'", "“": '"', "”": '"', "‘": "'", "’": "'"}))
+
+    output: list[str] = []
+    double_open = True
+    single_open = True
+    for char in text:
+        if char in {'"', "“", "”"}:
+            output.append("「" if double_open else "」")
+            double_open = not double_open
+        elif char in {"'", "‘", "’"}:
+            output.append("『" if single_open else "』")
+            single_open = not single_open
+        else:
+            output.append(char)
+    return "".join(output)
+
+
+def normalize_punctuation(text: str, *, quote_mode: str = "keep") -> str:
+    """Repair mechanical punctuation residue while preserving narrative use.
+
+    The normalizer deliberately does not remove functional question marks,
+    exclamation marks, ellipses or em dashes.  It only canonicalizes malformed
+    ASCII/repeated forms, markdown divider lines and an explicitly requested
+    quote style.  Original line endings and a final newline are preserved.
+    """
+    if quote_mode not in {"keep", "yan", "ascii"}:
+        raise ValueError(f"unsupported quote_mode: {quote_mode}")
+
+    parts = re.split(r"(\r\n|\n|\r)", text)
+    normalized_parts: list[str] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            normalized_parts.append(part)
             continue
 
-        s = line
-        # Replace English ellipses and dashes
-        s = re.sub(r"\.{3,}", "……", s)
-        s = re.sub(r"…{3,}", "……", s)
-        s = re.sub(r"-{2,}", "——", s)
-        s = re.sub(r"—{3,}", "——", s)
+        if re.fullmatch(r"\s*[-*_]{3,}\s*", part):
+            # Drop the divider content but leave its captured newline in place.
+            continue
 
-        # Fix English commas and periods outside numbers
-        s = re.sub(r"(?<!\d),(?!\d)", "，", s)
-        s = re.sub(r"(?<!\d)\.(?!\d)", "。", s)
-        s = re.sub(r"(?<!\d);(?!\d)", "；", s)
-        s = re.sub(r"(?<!\d):(?!\d)", "：", s)
-        s = re.sub(r"\?", "？", s)
-        s = re.sub(r"!", "！", s)
+        normalized = _PAUSE_TOKEN_RE.sub(lambda match: _normalize_pause_token(part, match), part)
+        normalized = re.sub(r"(?<!\d),(?!\d)", "，", normalized)
+        normalized = re.sub(r"(?<!\d)\.(?!\d)", "。", normalized)
+        normalized = re.sub(r"(?<!\d);(?!\d)", "；", normalized)
+        normalized = re.sub(r"(?<!\d):(?!\d)", "：", normalized)
+        normalized = normalized.replace("?", "？").replace("!", "！")
+        normalized_parts.append(_normalize_quotes(normalized, quote_mode))
 
-        if quote_mode == "yan":
-            s = s.replace("“", "「").replace("”", "」").replace("‘", "『").replace("’", "』")
-        elif quote_mode == "ascii":
-            s = s.replace("「", "“").replace("」", "”").replace("『", "‘").replace("』", "’")
-
-        normalized_lines.append(s)
-
-    return "\n".join(normalized_lines)
+    return "".join(normalized_parts)

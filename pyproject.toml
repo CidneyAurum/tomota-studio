@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tomota-writer"
 version = "0.1.0"
-description = "Local Chinese web-novel workflow with native webnovel-writing skill integration"
+description = "Local author-bound novel workflow with a neutral writing-logic core"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0", "tzdata>=2025.2"]
 

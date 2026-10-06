@@ -13,12 +13,14 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+from .authors import AuthorService
 from .autopilot import AutopilotRunner, load_contracts
 from .cleanup import CleanupManager
 from .generator import MockGenerator, generator_from_environment
 from .models import ChapterContract
 from .pipeline import PipelineBlocked, TomotaPipeline
 from .publisher import DryRunBrowserDriver, FanqiePublisher, PublishBlocked
+from .quality_context import analyze_book_quality
 from .scheduler import Scheduler, SHANGHAI
 from .skill_adapter import SkillAdapter
 from .store import ProjectStore
@@ -56,6 +58,84 @@ def build_parser() -> argparse.ArgumentParser:
     book_outline.add_argument("--json", action="store_true")
     book_sync = book_sub.add_parser("sync", help="从作品目录刷新数据库索引")
     book_sync.add_argument("--json", action="store_true")
+    for name in ["rebuild-preview", "rebuild"]:
+        item = book_sub.add_parser(name, help="预览或执行分级可恢复重建")
+        item.add_argument("--book-id", required=True)
+        item.add_argument("--scope-type", choices=["chapter", "volume", "book"], required=True)
+        item.add_argument("--scope-id", required=True)
+        if name == "rebuild":
+            item.add_argument("--confirm", required=True)
+        item.add_argument("--json", action="store_true")
+
+    author = sub.add_parser("author", help="管理可复用作者档案、版本、来源与作品绑定")
+    author_sub = author.add_subparsers(dest="author_command", required=True)
+    author_list = author_sub.add_parser("list")
+    author_list.add_argument("--include-system", action="store_true")
+    author_list.add_argument("--json", action="store_true")
+    author_get = author_sub.add_parser("get")
+    author_get.add_argument("--author-id", required=True)
+    author_get.add_argument("--json", action="store_true")
+    author_version_get = author_sub.add_parser("version-get")
+    author_version_get.add_argument("--version-id", required=True)
+    author_version_get.add_argument("--json", action="store_true")
+    author_delete = author_sub.add_parser("delete")
+    author_delete.add_argument("--author-id", required=True)
+    author_delete.add_argument("--json", action="store_true")
+    for name in ["create", "update", "version-create"]:
+        item = author_sub.add_parser(name)
+        if name != "create":
+            item.add_argument("--author-id", required=True)
+        item.add_argument("--file", required=True)
+        item.add_argument("--json", action="store_true")
+    author_publish = author_sub.add_parser("version-publish")
+    author_publish.add_argument("--author-id", required=True)
+    author_publish.add_argument("--version-id", required=True)
+    author_publish.add_argument("--json", action="store_true")
+    author_archive = author_sub.add_parser("version-archive")
+    author_archive.add_argument("--author-id", required=True)
+    author_archive.add_argument("--version-id", required=True)
+    author_archive.add_argument("--json", action="store_true")
+    author_source_add = author_sub.add_parser("source-add")
+    author_source_add.add_argument("--author-id", required=True)
+    author_source_add.add_argument("--file", required=True)
+    author_source_add.add_argument("--name", required=True)
+    author_source_add.add_argument("--rights-confirmed", action="store_true")
+    author_source_add.add_argument("--json", action="store_true")
+    author_source_delete = author_sub.add_parser("source-delete")
+    author_source_delete.add_argument("--author-id", required=True)
+    author_source_delete.add_argument("--source-id", required=True)
+    author_source_delete.add_argument("--json", action="store_true")
+    author_source_reorder = author_sub.add_parser("source-reorder")
+    author_source_reorder.add_argument("--author-id", required=True)
+    author_source_reorder.add_argument("--sources", required=True)
+    author_source_reorder.add_argument("--json", action="store_true")
+    author_context = author_sub.add_parser("distill-context")
+    author_context.add_argument("--author-id", required=True)
+    author_context.add_argument("--sources", default="")
+    author_context.add_argument("--json", action="store_true")
+    for name in ["binding-preview", "binding-set"]:
+        item = author_sub.add_parser(name)
+        item.add_argument("--book-id", required=True)
+        item.add_argument("--version-id", required=True)
+        item.add_argument("--json", action="store_true")
+    override_list = author_sub.add_parser("override-list")
+    override_list.add_argument("--book-id", required=True)
+    override_list.add_argument("--json", action="store_true")
+    override_set = author_sub.add_parser("override-set")
+    override_set.add_argument("--book-id", required=True)
+    override_set.add_argument("--file", required=True)
+    override_set.add_argument("--json", action="store_true")
+    override_delete = author_sub.add_parser("override-delete")
+    override_delete.add_argument("--book-id", required=True)
+    override_delete.add_argument("--override-id", required=True)
+    override_delete.add_argument("--json", action="store_true")
+    override_import = author_sub.add_parser("override-import")
+    override_import.add_argument("--book-id", required=True)
+    override_import.add_argument("--file", required=True)
+    override_import.add_argument("--json", action="store_true")
+    policy_compile = author_sub.add_parser("policy-compile")
+    policy_compile.add_argument("--book-id", required=True)
+    policy_compile.add_argument("--json", action="store_true")
 
     scan = sub.add_parser("scan", help="按 oh-story-claudecode 进行题材扫榜与选材策划")
     scan.add_argument("--genre", required=True, help="目标题材/赛道标签，如'都市异能'、'年代军婚'")
@@ -93,7 +173,14 @@ def build_parser() -> argparse.ArgumentParser:
     deslop.add_argument("--apply", action="store_true", help="自动修复并覆盖正文")
     deslop.add_argument("--quote-mode", choices=["keep", "yan", "ascii"], default="keep", help="引号规范模式")
 
-    cover = sub.add_parser("cover", help="为小说生成番茄爆款封面设计方案与生图 Prompt")
+    quality = sub.add_parser("quality", help="生成可复现的章节与全书文字质量报告")
+    quality_sub = quality.add_subparsers(dest="quality_command", required=True)
+    quality_report = quality_sub.add_parser("report", help="完整读取所选章节并执行跨章低 AI 味体检")
+    quality_report.add_argument("--book-id", required=True)
+    quality_report.add_argument("--chapters", default="", help="逗号分隔章节号；为空读取全部有正文的章节")
+    quality_report.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+
+    cover = sub.add_parser("cover", help="为小说生成目标平台封面设计方案与生图 Prompt")
     cover.add_argument("--book-id", required=True)
     cover.add_argument("--chapter", type=int, default=1, help="提取视觉高光的章节号")
     cover.add_argument("--output", default="", help="保存生图 Prompt 的输出文件路径")
@@ -161,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_start.add_argument("--book-id", required=True)
     workflow_start.add_argument("--chapters", required=True, help="逗号分隔章节号")
     workflow_start.add_argument("--max-revisions", type=int, default=5)
+    workflow_start.add_argument("--exclusive", action="store_true", help="同书复用已有工作流，禁止并行共享 Canon")
     workflow_start.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
     workflow_rework = workflow_sub.add_parser("rework", help="按作者反馈重开一个已通过章节，并保留旧版本与审查记录")
     workflow_rework.add_argument("--book-id", required=True)
@@ -168,6 +256,14 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_rework.add_argument("--max-revisions", type=int, default=5)
     workflow_rework.add_argument("--file", required=True, help="包含 feedback 字段的 UTF-8 JSON")
     workflow_rework.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+    workflow_scope_rework = workflow_sub.add_parser("rework-scope", help="按评估结果返工章节、分卷或全书中的已生成章节")
+    workflow_scope_rework.add_argument("--book-id", required=True)
+    workflow_scope_rework.add_argument("--chapters", required=True, help="逗号分隔章节号")
+    workflow_scope_rework.add_argument("--scope-type", choices=["book", "volume", "chapter"], required=True)
+    workflow_scope_rework.add_argument("--scope-id", default="")
+    workflow_scope_rework.add_argument("--max-revisions", type=int, default=5)
+    workflow_scope_rework.add_argument("--file", required=True, help="包含 feedback 字段的 UTF-8 JSON")
+    workflow_scope_rework.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
     workflow_status = workflow_sub.add_parser("status", help="查看流程状态")
     workflow_status.add_argument("--run-id", required=True)
     workflow_status.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
@@ -177,7 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_submit = workflow_sub.add_parser("submit", help="提交阶段 JSON 产物并推进状态")
     workflow_submit.add_argument("--run-id", required=True)
     workflow_submit.add_argument("--file", required=True)
+    workflow_submit.add_argument("--action-id", required=True, help="workflow next 签发的 StageActionV2 action_id")
     workflow_submit.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+    workflow_supersede = workflow_sub.add_parser("supersede-candidate", help="改选已生成的关键节点候选并作废其下游依赖")
+    workflow_supersede.add_argument("--run-id", required=True)
+    workflow_supersede.add_argument("--source-stage", choices=["story_foundation", "chapter_design"], required=True)
+    workflow_supersede.add_argument("--chapter", type=int)
+    workflow_supersede.add_argument("--file", required=True)
+    workflow_supersede.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
 
     fanqie = sub.add_parser("fanqie", help="番茄作品运营的本地安全接口")
     fanqie_sub = fanqie.add_subparsers(dest="fanqie_command", required=True)
@@ -197,10 +300,16 @@ def build_parser() -> argparse.ArgumentParser:
     fanqie_export.add_argument("--batch", required=True)
     fanqie_export.add_argument("--confirm", required=True)
     fanqie_export.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+    fanqie_check = fanqie_sub.add_parser("check", help="只校验批次正文，不导出或覆盖任务")
+    fanqie_check.add_argument("--batch", required=True)
+    fanqie_check.add_argument("--json", action="store_true")
     fanqie_reconcile = fanqie_sub.add_parser("reconcile", help="安全回写浏览器执行结果")
     fanqie_reconcile.add_argument("--batch", required=True)
     fanqie_reconcile.add_argument("--result", default="")
     fanqie_reconcile.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
+    fanqie_abandon = fanqie_sub.add_parser("abandon", help="废弃尚未提交的本地发布预览")
+    fanqie_abandon.add_argument("--batch", required=True)
+    fanqie_abandon.add_argument("--json", action="store_true", help="以稳定 JSON 输出")
 
     studio = sub.add_parser("studio", help="启动 Tomota Studio 本地可视化工作台")
     studio.add_argument("--port", type=int, default=43127)
@@ -218,6 +327,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .book_lock import BookBusyError, delegated_cli
+    import os
+    args = build_parser().parse_args(argv)
+    try:
+        with delegated_cli(Path(args.root).resolve(), os.environ.get("TOMOTA_BOOK_TRANSACTION_BOOK", "")):
+            return _main(argv)
+    except BookBusyError as exc:
+        _configure_unicode_stdio()
+        print(json.dumps({"status": "error", "error_type": "BookBusyError", "message": str(exc)}, ensure_ascii=False))
+        return 2
+
+
+def _main(argv: list[str] | None = None) -> int:
     _configure_unicode_stdio()
     args = build_parser().parse_args(argv)
     root = Path(args.root).resolve()
@@ -227,10 +349,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             store = ProjectStore(root)
             directory = store.create_book(args.book_id, args.title, {"synopsis": args.synopsis, "genre": args.genre, "target_platform": "番茄小说", "chapters_per_day": 2, "buffer_days": 7})
+            AuthorService(root).compile_policy(args.book_id)
             print(directory)
             return 0
         if args.command == "book":
             return _book_command(root, args)
+        if args.command == "author":
+            return _author_command(root, args)
         if args.command == "scan":
             pipeline = TomotaPipeline(root)
             artifact = pipeline.scan(args.genre, is_short=args.short)
@@ -272,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
             result = pipeline.deslop_chapter(args.book_id, args.chapter, apply=args.apply, quote_mode=args.quote_mode)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "quality":
+            return _quality_command(root, args)
         if args.command == "plan":
             pipeline = TomotaPipeline(root)
             synopsis = args.synopsis or (pipeline.store.get_book(args.book_id) or {}).get("metadata", {}).get("synopsis", "")
@@ -330,11 +457,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     except (PipelineBlocked, PublishBlocked, WorkflowError, RuntimeError, ValueError) as exc:
         if getattr(args, "json", False):
-            print(json.dumps({
+            payload = exc.to_dict() if isinstance(exc, WorkflowError) else {
                 "status": "error",
                 "error_type": type(exc).__name__,
+                "error_code": "request_failed",
+                "failure_class": "request",
                 "message": str(exc),
-            }, ensure_ascii=False, indent=2))
+                "retryable": False,
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"错误：{exc}", file=sys.stderr)
         return 2
@@ -369,12 +500,31 @@ def _book_command(root: Path, args: argparse.Namespace) -> int:
         if not title:
             raise ValueError("作品标题不能为空")
         metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
-        store.create_book(book_id, title, dict(metadata))
-        if isinstance(value.get("outline"), dict):
-            store.save_master_outline(book_id, dict(value["outline"]))
-        if isinstance(value.get("chapters"), list):
-            store.save_outline_chapters(book_id, list(value["chapters"]))
-        print(json.dumps({"book": store.get_book(book_id), "outline": store.load_master_outline(book_id), "chapters": store.list_chapters(book_id)}, ensure_ascii=False, indent=2))
+        author_version_id = str(value.get("authorProfileVersionId") or value.get("author_profile_version_id") or "").strip() or None
+        try:
+            store.create_book(book_id, title, dict(metadata), author_profile_version_id=author_version_id)
+            AuthorService(root).compile_policy(book_id)
+            if isinstance(value.get("outline"), dict):
+                store.save_master_outline(book_id, dict(value["outline"]))
+            if isinstance(value.get("chapters"), list):
+                store.save_outline_chapters(book_id, list(value["chapters"]))
+            if isinstance(value.get("planning_contract"), dict):
+                planning_contract = dict(value["planning_contract"])
+                # 规划阶段已决策的作者规则落地映射随契约一并持久化，避免 story_foundation 重新推倒。
+                if isinstance(value.get("author_application"), dict):
+                    planning_contract["author_application"] = value["author_application"]
+                contract = store.save_foundation_contract(book_id, planning_contract)
+            else:
+                contract = {}
+        except Exception:
+            # 创建失败时不留下半本书：清理目录与数据库记录后重新抛出。
+            with store.connect() as connection:
+                for table in ["book_author_bindings", "book_style_overrides", "chapters", "canon_snapshots", "publish_batches", "skill_runs", "workflow_runs", "events"]:
+                    connection.execute(f"DELETE FROM {table} WHERE book_id=?", (book_id,))
+                connection.execute("DELETE FROM books WHERE id=?", (book_id,))
+            shutil.rmtree(store.book_dir(book_id), ignore_errors=True)
+            raise
+        print(json.dumps({"book": store.get_book(book_id), "outline": store.load_master_outline(book_id), "chapters": store.list_chapters(book_id), "foundation_contract": contract}, ensure_ascii=False, indent=2))
         return 0
     book_id = str(args.book_id)
     if args.book_command == "update":
@@ -386,14 +536,128 @@ def _book_command(root: Path, args: argparse.Namespace) -> int:
     if args.book_command == "outline":
         if source:
             master = value.get("master") if isinstance(value.get("master"), dict) else value
-            saved = store.save_master_outline(book_id, dict(master))
-            if isinstance(value.get("chapters"), list):
-                store.save_outline_chapters(book_id, list(value["chapters"]))
+            contract_update = value.get("planning_contract_update") if isinstance(value.get("planning_contract_update"), dict) else None
+            book_update = value.get("book") if isinstance(value.get("book"), dict) else None
+            chapters = value.get("chapters") if isinstance(value.get("chapters"), list) else [item.get("contract", item) for item in store.list_chapters(book_id)]
+            committed = store.commit_outline_planning(
+                book_id,
+                master=dict(master),
+                chapters=list(chapters),
+                contract_update=dict(contract_update) if contract_update is not None else None,
+                book_update=dict(book_update) if book_update is not None else None,
+            )
+            saved = committed["master"]
+            foundation = committed["foundation_contract"]
         else:
             saved = store.load_master_outline(book_id)
-        print(json.dumps({"master": saved, "chapters": store.list_chapters(book_id)}, ensure_ascii=False, indent=2))
+            foundation = store.load_foundation_contract(book_id)
+        print(json.dumps({"master": saved, "chapters": store.list_chapters(book_id), "foundation_contract": foundation}, ensure_ascii=False, indent=2))
+        return 0
+    if args.book_command == "rebuild-preview":
+        print(json.dumps(store.preview_rebuild(book_id, args.scope_type, args.scope_id), ensure_ascii=False, indent=2))
+        return 0
+    if args.book_command == "rebuild":
+        result = store.apply_rebuild(book_id, args.scope_type, args.scope_id, args.confirm)
+        # Full rebuild deliberately purges every derived file while retaining
+        # the immutable author binding.  Recreate the policy from that binding
+        # before returning so the next planning request can never see a bound
+        # book with a missing author contract.
+        if args.scope_type == "book":
+            policy = AuthorService(root).compile_policy(book_id)
+            result["author_policy_recompiled"] = {
+                "policy_hash": policy.get("policy_hash"),
+                "profile_hash": (policy.get("author_binding") or {}).get("profile_hash"),
+                "active_rule_count": len(policy.get("active_rules") or []),
+            }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     raise ValueError(f"未知 book 命令：{args.book_command}")
+
+
+def _author_command(root: Path, args: argparse.Namespace) -> int:
+    service = AuthorService(root)
+
+    def payload() -> dict[str, object]:
+        source = Path(str(args.file)).resolve()
+        if not source.is_file():
+            raise ValueError(f"输入文件不存在：{source}")
+        value = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("输入文件顶层必须是 JSON 对象")
+        return value
+
+    command = args.author_command
+    if command == "list":
+        value: object = {"authors": service.list_profiles(include_system=args.include_system)}
+    elif command == "get":
+        value = {"author": service.get_profile(args.author_id)}
+        if value["author"] is None:
+            raise ValueError("作者档案不存在")
+    elif command == "delete":
+        value = {"author": service.delete_profile(args.author_id)}
+    elif command == "create":
+        raw = payload()
+        value = {"author": service.create_profile(
+            str(raw.get("name") or ""), str(raw.get("description") or ""),
+            raw.get("persona") if isinstance(raw.get("persona"), dict) else None,
+        )}
+    elif command == "update":
+        raw = payload()
+        value = {"author": service.update_profile(
+            args.author_id,
+            name=None if "name" not in raw else str(raw["name"]),
+            description=None if "description" not in raw else str(raw["description"]),
+            status=None if "status" not in raw else str(raw["status"]),
+            persona=None if "persona" not in raw else raw.get("persona") if isinstance(raw.get("persona"), dict) else {},
+        )}
+    elif command == "version-create":
+        raw = payload()
+        profile = raw.get("profile") if isinstance(raw.get("profile"), dict) else raw
+        source_ids = [str(item) for item in raw.get("source_ids", [])] if isinstance(raw.get("source_ids"), list) else []
+        value = {"version": service.create_version(args.author_id, dict(profile), source_ids=source_ids)}
+    elif command == "version-get":
+        version = service.get_version(args.version_id)
+        if not version:
+            raise ValueError("作者版本不存在")
+        value = {"version": version}
+    elif command == "version-publish":
+        value = {"version": service.publish_version(args.author_id, args.version_id)}
+    elif command == "version-archive":
+        value = {"version": service.archive_version(args.author_id, args.version_id)}
+    elif command == "source-add":
+        value = {"source": service.add_source(
+            args.author_id, Path(args.file), args.name, rights_confirmed=args.rights_confirmed,
+        )}
+    elif command == "source-delete":
+        value = {"source": service.delete_source(args.author_id, args.source_id)}
+    elif command == "source-reorder":
+        source_ids = [item.strip() for item in args.sources.split(",") if item.strip()]
+        value = {"sources": service.reorder_sources(args.author_id, source_ids)}
+    elif command == "distill-context":
+        source_ids = [item.strip() for item in args.sources.split(",") if item.strip()]
+        value = service.distillation_context(args.author_id, source_ids or None)
+    elif command == "binding-preview":
+        value = service.preview_binding(args.book_id, args.version_id)
+    elif command == "binding-set":
+        value = service.bind_book(args.book_id, args.version_id)
+    elif command == "override-list":
+        value = {"overrides": service.list_overrides(args.book_id)}
+    elif command == "override-set":
+        value = {"override": service.upsert_override(args.book_id, payload()), "overrides": service.list_overrides(args.book_id)}
+    elif command == "override-delete":
+        value = {"override": service.delete_override(args.book_id, args.override_id), "overrides": service.list_overrides(args.book_id)}
+    elif command == "override-import":
+        raw = payload()
+        values = raw.get("preferences") if isinstance(raw.get("preferences"), list) else raw.get("overrides")
+        if not isinstance(values, list):
+            raise ValueError("override-import 需要 preferences 数组")
+        value = {"imported": service.import_legacy_overrides(args.book_id, values), "overrides": service.list_overrides(args.book_id)}
+    elif command == "policy-compile":
+        value = {"policy": service.compile_policy(args.book_id), "binding": service.get_binding(args.book_id)}
+    else:
+        raise ValueError(f"未知 author 命令：{command}")
+    print(json.dumps(value, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _configure_unicode_stdio() -> None:
@@ -422,8 +686,8 @@ def _skill_command(root: Path, command: str) -> int:
         return 0 if value.get("ok") else 2
     manifest = adapter.inspect()
     result = adapter.verify_lock()
-    print(json.dumps({"manifest": manifest.to_dict(), "lock": result.to_dict()}, ensure_ascii=False, indent=2))
-    return 0 if result.ok else 2
+    print(json.dumps({"manifest": manifest.to_dict(), "lock": result.to_dict(), "runtime_policy": adapter.runtime_policy()}, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _release_command(root: Path, args: argparse.Namespace) -> int:
@@ -541,7 +805,14 @@ def _status_command(root: Path, book_id: str) -> int:
     store = ProjectStore(root)
     store.initialize()
     if book_id:
-        print(json.dumps({"book": store.get_book(book_id), "chapters": store.list_chapters(book_id), "workflows": store.list_workflow_runs(book_id)}, ensure_ascii=False, indent=2))
+        authors = AuthorService(root)
+        policy_path = store.book_dir(book_id) / "canon" / "writing-policy.json"
+        policy = json.loads(policy_path.read_text(encoding="utf-8")) if policy_path.is_file() else None
+        print(json.dumps({
+            "book": store.get_book(book_id), "chapters": store.list_chapters(book_id),
+            "workflows": store.list_workflow_runs(book_id), "author_binding": authors.get_binding(book_id),
+            "writing_policy": policy,
+        }, ensure_ascii=False, indent=2))
     else:
         with store.connect() as connection:
             rows = connection.execute("SELECT id,title,updated_at FROM books ORDER BY updated_at DESC").fetchall()
@@ -549,11 +820,37 @@ def _status_command(root: Path, book_id: str) -> int:
     return 0
 
 
+def _quality_command(root: Path, args: argparse.Namespace) -> int:
+    store = ProjectStore(root)
+    store.initialize()
+    if not store.get_book(args.book_id):
+        raise ValueError(f"作品不存在：{args.book_id}")
+    requested = {
+        int(item.strip()) for item in str(args.chapters or "").split(",") if item.strip()
+    }
+    available = [int(item.get("chapter_number") or 0) for item in store.list_chapters(args.book_id)]
+    numbers = sorted(requested or {item for item in available if item > 0})
+    chapters: list[tuple[int, str]] = []
+    missing: list[int] = []
+    for number in numbers:
+        text = store.read_content(args.book_id, number)
+        if text.strip():
+            chapters.append((number, text))
+        else:
+            missing.append(number)
+    report = analyze_book_quality(chapters)
+    report["book_id"] = args.book_id
+    report["requested_chapters"] = numbers
+    report["missing_or_empty_chapters"] = missing
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _workflow_command(root: Path, args: argparse.Namespace) -> int:
     engine = WorkflowEngine(root)
     if args.workflow_command == "start":
         chapters = [int(item.strip()) for item in args.chapters.split(",") if item.strip()]
-        run = engine.start(args.book_id, chapters, max_revisions=args.max_revisions)
+        run = engine.start(args.book_id, chapters, max_revisions=args.max_revisions, exclusive=args.exclusive)
         print(json.dumps({"run": run.to_dict(), "next": engine.next_action(run.run_id)}, ensure_ascii=False, indent=2))
         return 0
     if args.workflow_command == "rework":
@@ -561,7 +858,22 @@ def _workflow_command(root: Path, args: argparse.Namespace) -> int:
         if not source.is_file():
             raise RuntimeError(f"rework request does not exist: {source}")
         value = json.loads(source.read_text(encoding="utf-8"))
-        run = engine.start_rework(args.book_id, args.chapter, str(value.get("feedback", "")), max_revisions=args.max_revisions)
+        run = engine.start_rework(args.book_id, args.chapter, str(value.get("feedback", "")), max_revisions=args.max_revisions, request_id=str(value.get("request_id") or ""))
+        print(json.dumps({"run": run.to_dict(), "next": engine.next_action(run.run_id)}, ensure_ascii=False, indent=2))
+        return 0
+    if args.workflow_command == "rework-scope":
+        source = Path(args.file).resolve()
+        if not source.is_file():
+            raise RuntimeError(f"rework request does not exist: {source}")
+        value = json.loads(source.read_text(encoding="utf-8"))
+        chapters = [int(item.strip()) for item in args.chapters.split(",") if item.strip()]
+        start = engine.start_feedback_rework if "book_rules" in value else engine.start_scope_rework
+        rule_options = {"book_rules": value["book_rules"]} if "book_rules" in value else {}
+        run = start(
+            args.book_id, chapters, str(value.get("feedback", "")),
+            scope_type=args.scope_type, scope_id=args.scope_id,
+            max_revisions=args.max_revisions, **rule_options,
+        )
         print(json.dumps({"run": run.to_dict(), "next": engine.next_action(run.run_id)}, ensure_ascii=False, indent=2))
         return 0
     if args.workflow_command == "status":
@@ -570,7 +882,19 @@ def _workflow_command(root: Path, args: argparse.Namespace) -> int:
     if args.workflow_command == "next":
         print(json.dumps(engine.next_action(args.run_id), ensure_ascii=False, indent=2))
         return 0
-    result = engine.submit_file(args.run_id, args.file)
+    if args.workflow_command == "supersede-candidate":
+        source = Path(args.file).resolve()
+        if not source.is_file():
+            raise RuntimeError(f"candidate artifact does not exist: {source}")
+        value = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise RuntimeError("candidate artifact 顶层必须是 JSON 对象")
+        result = engine.supersede_with_candidate(
+            args.run_id, value, source_stage=args.source_stage, chapter_number=args.chapter,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] in {"running", "completed"} else 2
+    result = engine.submit_file(args.run_id, args.file, action_id=args.action_id)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] in {"running", "completed"} else 2
 
@@ -625,7 +949,25 @@ def _fanqie_command(root: Path, args: argparse.Namespace) -> int:
     batch = store.get_batch(args.batch)
     if not batch:
         raise RuntimeError(f"batch does not exist: {args.batch}")
+    if args.fanqie_command == "abandon":
+        if batch.status not in {"prepared", "preview", "failed"}:
+            raise RuntimeError(f"batch cannot be abandoned from status: {batch.status}")
+        store.update_batch(batch.batch_id, "superseded")
+        for suffix in (".json", ".preview.json"):
+            path = store.book_dir(batch.book_id) / "publish" / f"{batch.batch_id}{suffix}"
+            if not path.is_file():
+                continue
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["status"] = "superseded"
+            value["superseded_reason"] = "用户废弃待确认批次并准备按当前正文重新生成"
+            store.write_json(path, value)
+        store.append_event(batch.book_id, None, "publish_batch_superseded", {"batch_id": batch.batch_id, "reason": "user_abandoned_preview"})
+        print(json.dumps({"batch_id": batch.batch_id, "book_id": batch.book_id, "status": "superseded", "cloud_write_performed": False}, ensure_ascii=False, indent=2))
+        return 0
     publisher = FanqiePublisher(store, DryRunBrowserDriver())
+    if args.fanqie_command == "check":
+        print(json.dumps({"chapters": publisher.browser_jobs.check(batch)}, ensure_ascii=False))
+        return 0
     if args.fanqie_command == "export":
         path = publisher.export_browser_job(batch, confirmation=args.confirm)
         print(json.dumps({"batch_id": batch.batch_id, "job": str(path), "status": "exported"}, ensure_ascii=False, indent=2))

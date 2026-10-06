@@ -147,6 +147,13 @@ class ChapterContract:
     body_information_state: str = ""
     unresolved_foreshadowing: str = ""
     ending_type: str = ""
+    causality_check: str = ""
+    boundary_check: str = ""
+    consequence_check: str = ""
+    entry_state: str = ""
+    entry_trigger: str = ""
+    retained_consequences: str = ""
+    exit_state: str = ""
     target_word_count: int = 2500
     problem_tags: list[str] = field(default_factory=list)
     volume_id: str = "volume-1"

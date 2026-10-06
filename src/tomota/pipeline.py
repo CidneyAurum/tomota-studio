@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import difflib
+import re
 import json
 from pathlib import Path
 from typing import Any
@@ -29,10 +31,9 @@ class TomotaPipeline:
 
     def ensure_ready(self, *, require_lock: bool = True) -> None:
         self.store.initialize()
-        if require_lock:
-            result = self.skill.verify_lock()
-            if not result.ok:
-                raise PipelineBlocked(result.message or result.status)
+        # The external skill lock is diagnostic only. Generation uses the
+        # sealed neutral kernel, so an external package update cannot alter or
+        # stop a book run.
 
     def scan(self, genre: str, *, is_short: bool = False) -> GenerationArtifact:
         self.ensure_ready()
@@ -40,15 +41,16 @@ class TomotaPipeline:
         route = self.router.route(genre, stage)
         references = self.skill.build_reference_pack("concept_planning", keyword=genre)
         prompt_pack = self.skill.build_prompt_pack(
-            task=f"针对【{genre}】赛道进行{'短篇' if is_short else '长篇'}题材扫榜、核心卖点拆解与爆款选题策划",
+            task=f"针对【{genre}】整理{'短篇' if is_short else '长篇'}作品的可核验读者反馈与差异",
             stage=route.stage,
             module_chain=route.module_chain,
             references=references,
             compact=True,
         )
         scan_prompt = (
-            f"# 番茄网文扫榜选材：{genre}（{'短篇' if is_short else '长篇'}）\n\n"
-            f"请根据 oh-story 扫榜方法论，分析该赛道当前读者核心爽点、创新金手指切入点、前三章冲突模型与避坑指南。\n\n"
+            f"# 题材观察：{genre}（{'短篇' if is_short else '长篇'}）\n\n"
+            "请区分可核验事实、读者反馈与推测，整理读者预期、常见失效原因和仍有探索空间的差异。"
+            "不得把市场现象转成固定创作公式或自动写入任何作品契约。\n\n"
             f"{prompt_pack.render()}"
         )
         return GenerationArtifact("prompt", "scan", prompt_pack, {"genre": genre, "is_short": is_short, "prompt_text": scan_prompt})
@@ -61,18 +63,18 @@ class TomotaPipeline:
         raw = source.read_text(encoding="utf-8", errors="replace")
         route = self.router.route(source.stem, "analyze")
         prompt_pack = self.skill.build_prompt_pack(
-            task=f"拆解范本文档《{source.stem}》的结构节奏、故事引擎与剧情卡",
+            task=f"分析范本文档《{source.stem}》的因果、人物选择、信息组织与语言方法",
             stage=route.stage,
             module_chain=route.module_chain,
             compact=True,
         )
         analyze_prompt = (
-            f"# 爆款网文对标拆解：{source.name}\n\n"
-            f"请对以下文本进行逆向工程拆解：\n"
-            f"1. 核心卖点与预期管理\n"
-            f"2. 节奏曲线与情节点分布（钩子、危机、转折、高潮、即时反馈）\n"
-            f"3. 人设立体度与金手指驱动机制\n"
-            f"4. 可复用的结构模板（Chapter Contract 序列）\n\n"
+            f"# 作品写作方法分析：{source.name}\n\n"
+            "请对以下文本进行可举证分析：\n"
+            "1. 人物目标、选择、代价与后果链\n"
+            "2. 信息揭示、场景变化与节奏曲线\n"
+            "3. 人物声音、关系压力与知识边界\n"
+            "4. 可抽象的方法及其适用条件；不得复制题材骨架、人物或句面\n\n"
             f"## 参考文本\n{raw[:6000]}\n\n"
             f"{prompt_pack.render()}"
         )
@@ -89,7 +91,7 @@ class TomotaPipeline:
         prompt_pack = self.skill.build_prompt_pack(
             task=f"为作品《{title}》设计番茄小说封面视觉概念与文生图 Prompt",
             stage="cover",
-            module_chain=["cover"],
+            module_chain=[],
             compact=True,
         )
         cover_prompt = (
@@ -99,7 +101,7 @@ class TomotaPipeline:
             f"**核心高光场景**：\n{chapter_content[:1500] if chapter_content else '暂无正文'}\n\n"
             f"请生成：\n"
             f"1. 封面视觉焦点与人物构图设计\n"
-            f"2. 核心大字书名排版建议（契合番茄爆款视觉）\n"
+            f"2. 核心大字书名排版建议（符合目标平台展示要求）\n"
             f"3. 适用于 Midjourney / Stable Diffusion / Imagen 的中英文高质量生图 Prompt\n\n"
             f"{prompt_pack.render()}"
         )
@@ -115,19 +117,70 @@ class TomotaPipeline:
 
         findings = run_deslop_lint(content, skill_root=self.skill.root)
         normalized = normalize_punctuation(content, quote_mode=quote_mode)
+        after_findings = run_deslop_lint(normalized, skill_root=self.skill.root)
+
+        def finding_key(item: Any) -> tuple[str, str, str]:
+            return (str(item.rule_type), str(item.severity), str(item.excerpt).strip())
+
+        before_keys = {finding_key(item) for item in findings}
+        after_keys = {finding_key(item) for item in after_findings}
+        before_counts = {severity: sum(item.severity == severity for item in findings) for severity in ("blocking", "warning", "advisory")}
+        after_counts = {severity: sum(item.severity == severity for item in after_findings) for severity in ("blocking", "warning", "advisory")}
+        visible_characters = max(1, len(re.sub(r"\s+", "", content)))
+        effect_metrics = {
+            "scope": "deterministic_patterns_and_punctuation_only",
+            "before": {"findings": len(findings), "counts": before_counts, "density_per_1000_chars": round(len(findings) * 1000 / visible_characters, 2)},
+            "after": {"findings": len(after_findings), "counts": after_counts, "density_per_1000_chars": round(len(after_findings) * 1000 / max(1, len(re.sub(r"\s+", "", normalized))), 2)},
+            "resolved_patterns": len(before_keys - after_keys),
+            "new_patterns": len(after_keys - before_keys),
+            "text_similarity": round(difflib.SequenceMatcher(None, content, normalized).ratio(), 5),
+            "semantic_quality_measured": False,
+            "notice": "该指标只证明确定性模式和标点变化，不代表文笔更像人类；语义质量仍须独立审查或人工盲读。",
+        }
 
         changed = (normalized != content)
+        version_path: Path | None = None
         if apply and changed:
-            self.store.save_chapter(contract, status=chapter.get("status", "draft"), content=normalized)
-            self.store.append_event(book_id, chapter_number, "chapter_deslopped", {"applied": True, "findings_count": len(findings)})
+            before_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            after_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            version_dir = self.store.book_dir(book_id) / "audit" / "deslop-versions"
+            version_dir.mkdir(parents=True, exist_ok=True)
+            version_path = version_dir / f"chapter-{chapter_number:04d}-{before_hash[:12]}.md"
+            if not version_path.is_file():
+                version_path.write_text(content.rstrip() + "\n", encoding="utf-8")
+            self.store.append_event(book_id, chapter_number, "chapter_deslop_apply_requested", {
+                "quote_mode": quote_mode,
+                "findings_count": len(findings),
+                "blocking_count": sum(item.severity == "blocking" for item in findings),
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+                "version_path": str(version_path),
+            })
+            prior_status = str(chapter.get("status") or "draft")
+            release_statuses = {"approved", "reviewed_pending_approval", "scheduled", "submitted", "published"}
+            next_status = "modified_after_review" if prior_status in release_statuses else prior_status
+            self.store.save_chapter(contract, status=next_status, content=normalized)
+            self.store.append_event(book_id, chapter_number, "chapter_deslopped", {
+                "applied": True,
+                "quote_mode": quote_mode,
+                "prior_status": prior_status,
+                "status": next_status,
+                "findings_count": len(findings),
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+                "version_path": str(version_path),
+            })
 
         return {
             "book_id": book_id,
             "chapter_number": chapter_number,
             "findings": [f.to_dict() for f in findings],
             "punctuation_normalized": changed,
-            "applied": apply,
+            "applied": bool(apply and changed),
+            "changed": bool(apply and changed),
+            "version_path": str(version_path) if version_path else None,
             "content_preview": normalized[:300],
+            "effect_metrics": effect_metrics,
         }
 
     def plan(self, book_id: str, synopsis: str) -> GenerationArtifact:
