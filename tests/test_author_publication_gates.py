@@ -2,6 +2,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tomota.authors import AuthorService
@@ -55,3 +56,19 @@ class AuthorPublicationGateTests(unittest.TestCase):
     def test_unknown_creation_status_rejected(self):
         with self.assertRaisesRegex(ValueError, "status"):
             self.service.create_version(self.author_id, author_profile(), status="ready")
+
+    def test_duplicate_sources_cannot_inflate_corpus(self):
+        with self.assertRaisesRegex(ValueError, "不能重复"):
+            self.service._source_manifest(self.author_id, ["same", "same"])
+
+    def test_mutated_source_rejected_against_frozen_hash(self):
+        path = Path(self.directory.name) / "source.txt"
+        path.write_text("原始来源内容。" * 50, encoding="utf-8")
+        source = self.service.add_source(self.author_id, path, "source.txt", rights_confirmed=True)
+        manifest = self.service._source_manifest(self.author_id, [source["id"]])
+        (self.service.root / source["text_path"]).write_text("已被替换的来源。", encoding="utf-8")
+        profile = {"provenance": {"kind": "distilled", "evidence": []},
+                   "style_dimensions": [{} for _ in range(66)], "application_blueprint": {},
+                   "distillation_quality": {"corpus_coverage": 100}}
+        with self.assertRaisesRegex(ValueError, "text_hash"):
+            self.service._validate_distilled_profile(self.author_id, profile, manifest)
